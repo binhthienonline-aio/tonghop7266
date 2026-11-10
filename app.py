@@ -487,9 +487,16 @@ def main():
                 for warning in result["warnings"]:
                     st.warning(warning)
                 if len(result.get("attempts", [])) > 1:
-                    with st.expander("So sánh các phương án OCR bổ sung"):
+                    st.markdown("**So sánh các phương án OCR bổ sung**")
+                    # Không dùng st.expander lồng bên trong expander chi tiết ảnh:
+                    # Streamlit chặn kiểu lồng này và gây StreamlitAPIException.
+                    with st.container(border=True):
                         for attempt_no, attempt in enumerate(result["attempts"], start=1):
-                            st.markdown(f"**Phương án {attempt_no}: {attempt['variant']} · PSM {attempt['psm']} · {attempt['confidence']:.1f}% · {attempt.get('seconds', 0):.1f}s**")
+                            st.markdown(
+                                f"**Phương án {attempt_no}: {attempt['variant']} · "
+                                f"PSM {attempt['psm']} · {attempt['confidence']:.1f}% · "
+                                f"{attempt.get('seconds', 0):.1f}s**"
+                            )
                             st.text(attempt["text"][:12000] or "Không nhận diện được văn bản.")
 
     with tab2:
