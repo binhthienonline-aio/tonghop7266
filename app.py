@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import io
 import re
+import time
 import zipfile
+from difflib import SequenceMatcher
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -19,10 +21,13 @@ from openpyxl.styles import Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 APP_TITLE = "ĐMX SMART REPORT AI"
-MAX_FILES = 30
+MAX_FILES = 10
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_ZIP_BYTES = 25 * 1024 * 1024
 MAX_BATCH_EXPANDED_BYTES = 60 * 1024 * 1024
+OCR_PRIMARY_PSM = 6
+OCR_RETRY_PSM = 11
+OCR_LOW_CONFIDENCE = 78.0
 ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
 st.set_page_config(page_title=APP_TITLE, page_icon="📊", layout="wide")
@@ -80,9 +85,9 @@ def load_image_items(uploaded_files: list[Any], zip_upload: Any | None) -> list[
                     raise ValueError("Tổng ảnh sau giải nén vượt 60 MB.")
                 items.append({"name": info.filename, "bytes": zf.read(info), "source": "ZIP"})
                 if len(items) > MAX_FILES:
-                    raise ValueError("Tổng số ảnh vượt 30.")
+                    raise ValueError("V1.2 giới hạn tối đa 10 ảnh mỗi lượt.")
     if len(items) > MAX_FILES:
-        raise ValueError("Tổng số ảnh vượt 30.")
+        raise ValueError("V1.2 giới hạn tối đa 10 ảnh mỗi lượt.")
     if not items:
         raise ValueError("Chưa có ảnh hợp lệ.")
     seen = {}
@@ -96,7 +101,7 @@ def fetch_public_drive_file(url: str) -> dict:
     import gdown
     url = url.strip()
     if not url or "/folders/" in url:
-        raise ValueError("V1.1 chỉ hỗ trợ link file ảnh Google Drive công khai, không hỗ trợ thư mục/private Drive.")
+        raise ValueError("V1.2 hiện hỗ trợ link file ảnh Google Drive công khai, không hỗ trợ thư mục/private Drive.")
     out = gdown.download(url=url, quiet=True, fuzzy=True)
     if not out:
         raise ValueError("Không tải được file Drive. Kiểm tra quyền chia sẻ.")
@@ -114,22 +119,30 @@ def decode_image(raw: bytes) -> np.ndarray:
         raise ValueError("Không giải mã được ảnh.")
     return image
 
-def preprocess_variants(bgr: np.ndarray) -> list[tuple[str, np.ndarray]]:
+def prepare_primary_image(bgr: np.ndarray) -> np.ndarray:
+    """Một lần tiền xử lý chính; giữ chữ đủ lớn nhưng tránh phóng ảnh quá mức."""
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape[:2]
-    scale = 2.0 if max(h, w) < 2600 else 1.35
-    enlarged = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(enlarged)
-    otsu = cv2.threshold(clahe, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-    adaptive = cv2.adaptiveThreshold(clahe, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                     cv2.THRESH_BINARY, 31, 11)
-    return [("Ảnh xám tăng kích thước", enlarged), ("CLAHE + Otsu", otsu),
-            ("CLAHE + Adaptive", adaptive)]
+    longest = max(h, w)
+    if longest < 1800:
+        scale = min(1.6, 1800 / max(longest, 1))
+        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    elif longest > 3200:
+        scale = 3200 / longest
+        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    # CLAHE nhẹ giúp tăng tương phản; chỉ tạo một ảnh chính.
+    return cv2.createCLAHE(clipLimit=1.8, tileGridSize=(8, 8)).apply(gray)
+
 
 def run_ocr(image: np.ndarray, psm: int) -> tuple[str, float, list[dict]]:
+    """Một lần gọi Tesseract: lấy token, vị trí và confidence; dựng text từ cùng kết quả."""
     config = f"--oem 1 --psm {psm}"
-    data = pytesseract.image_to_data(image, lang="vie+eng", config=config, output_type=Output.DICT)
+    data = pytesseract.image_to_data(
+        image, lang="vie+eng", config=config, output_type=Output.DICT,
+        timeout=45
+    )
     words, confs = [], []
+    lines: dict[tuple[int, int, int, int], list[str]] = {}
     for i, raw_token in enumerate(data["text"]):
         token = str(raw_token).strip()
         try:
@@ -145,33 +158,96 @@ def run_ocr(image: np.ndarray, psm: int) -> tuple[str, float, list[dict]]:
                 "block": int(data["block_num"][i]), "paragraph": int(data["par_num"][i]),
                 "line": int(data["line_num"][i]), "word": int(data["word_num"][i])
             })
-    text = pytesseract.image_to_string(image, lang="vie+eng", config=config)
+            key = (int(data["page_num"][i]), int(data["block_num"][i]),
+                   int(data["par_num"][i]), int(data["line_num"][i]))
+            lines.setdefault(key, []).append(token)
+    text = "\n".join(" ".join(tokens) for tokens in lines.values())
     return text, (float(np.mean(confs)) if confs else 0.0), words
 
-def process_one(item: dict) -> dict:
+
+def _ocr_risk(text: str, confidence: float, words: list[dict]) -> list[str]:
+    risks = []
+    if confidence < OCR_LOW_CONFIDENCE:
+        risks.append(f"Confidence OCR thấp ({confidence:.1f}%).")
+    if len(words) < 8 or len(text.strip()) < 40:
+        risks.append("Nội dung nhận diện ít; có thể ảnh bị cắt, mờ hoặc OCR bỏ sót.")
+    if re.search(r"[Il|][0-9]|[0-9][OQ]", text):
+        risks.append("Có ký tự dễ nhầm I/l/1 hoặc O/0.")
+    return risks
+
+
+def _process_one_uncached(item: dict) -> dict:
+    started = time.perf_counter()
     bgr = decode_image(item["bytes"])
+    primary = prepare_primary_image(bgr)
     attempts = []
-    for variant_name, image in preprocess_variants(bgr):
-        for psm in (6, 11):
-            text, conf, words = run_ocr(image, psm)
-            attempts.append({"variant": variant_name, "psm": psm, "text": text,
-                             "confidence": conf, "words": words})
-    best = max(attempts, key=lambda x: (x["confidence"], len(x["text"].strip())))
-    warnings = []
-    if best["confidence"] < 75:
-        warnings.append("Confidence OCR thấp; cần đối chiếu ảnh gốc.")
-    if not best["text"].strip():
-        warnings.append("Không nhận diện được văn bản.")
+
+    t0 = time.perf_counter()
+    text, conf, words = run_ocr(primary, OCR_PRIMARY_PSM)
+    attempts.append({"variant": "Ảnh xám + CLAHE nhẹ", "psm": OCR_PRIMARY_PSM,
+                     "text": text, "confidence": conf, "words": words,
+                     "seconds": round(time.perf_counter() - t0, 2)})
+    selected = attempts[0]
+    initial_risks = _ocr_risk(text, conf, words)
+
+    # Chỉ kiểm tra sâu khi kết quả chính có dấu hiệu rủi ro.
+    if initial_risks:
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape[:2]
+        longest = max(h, w)
+        if longest < 1800:
+            scale = min(1.6, 1800 / max(longest, 1))
+            gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        elif longest > 3200:
+            scale = 3200 / longest
+            gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        for variant_name, variant_img, psm in (
+            ("Otsu kiểm tra", otsu, OCR_PRIMARY_PSM),
+            ("Ảnh xám PSM 11 kiểm tra", gray, OCR_RETRY_PSM),
+        ):
+            t0 = time.perf_counter()
+            retry_text, retry_conf, retry_words = run_ocr(variant_img, psm)
+            attempts.append({"variant": variant_name, "psm": psm,
+                             "text": retry_text, "confidence": retry_conf,
+                             "words": retry_words,
+                             "seconds": round(time.perf_counter() - t0, 2)})
+        # Chọn kết quả có confidence tốt hơn; không dùng kết quả này như số liệu đã xác minh.
+        selected = max(attempts, key=lambda a: (a["confidence"], len(a["text"].strip())))
+
+    warnings = _ocr_risk(selected["text"], selected["confidence"], selected["words"])
+    if len(attempts) > 1:
+        normalized = [re.sub(r"\s+", " ", a["text"]).strip().casefold() for a in attempts]
+        if any(SequenceMatcher(None, normalized[0], other).ratio() < 0.65 for other in normalized[1:]):
+            warnings.append("Các phương án OCR có khác biệt đáng kể; cần so sánh với ảnh gốc.")
     if item.get("duplicate_of"):
         warnings.append("Ảnh trùng byte với: " + item["duplicate_of"])
-    if re.search(r"[Il|][0-9]|[0-9][OQ]", best["text"]):
-        warnings.append("Có ký tự dễ nhầm I/l/1 hoặc O/0.")
+    if initial_risks and not warnings:
+        warnings.append("Đã phải OCR kiểm tra bổ sung; cần đối chiếu ảnh gốc.")
+    if not selected["text"].strip():
+        warnings.append("Không nhận diện được văn bản.")
     return {
         "name": item["name"], "source": item["source"], "sha256": item["sha256"],
-        "text": best["text"], "confidence": round(best["confidence"], 1),
-        "variant": best["variant"], "psm": best["psm"], "warnings": warnings,
-        "words": best["words"], "attempts": attempts, "reviewed": False, "review_note": ""
+        "text": selected["text"], "confidence": round(selected["confidence"], 1),
+        "variant": selected["variant"], "psm": selected["psm"], "warnings": warnings,
+        "words": selected["words"], "attempts": attempts, "reviewed": False,
+        "review_note": "", "ocr_seconds": round(time.perf_counter() - started, 2),
+        "ocr_attempt_count": len(attempts), "needs_review": bool(warnings)
     }
+
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def process_one_cached(raw: bytes, name: str, source: str, file_hash: str,
+                       duplicate_of: str) -> dict:
+    # Cache theo nội dung ảnh; đổi ảnh sẽ tự tạo khóa cache mới.
+    item = {"bytes": raw, "name": name, "source": source,
+            "sha256": file_hash, "duplicate_of": duplicate_of}
+    return _process_one_uncached(item)
+
+
+def process_one(item: dict) -> dict:
+    return process_one_cached(item["bytes"], item["name"], item["source"],
+                               item["sha256"], item.get("duplicate_of", ""))
 
 # ---------- Business rules / structured input ----------
 GROUP_COLUMNS = ["NHÓM HÀNG", "THỰC HIỆN", "TARGET", "% HT DỰ KIẾN"]
@@ -318,7 +394,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     st.title("ĐMX SMART REPORT AI")
-    st.caption("V1.1 · Kiểm soát ngày dữ liệu · Lọc đúng 9 nhân viên có ảnh KPI · Xuất 6 Sheet")
+    st.caption("V1.2 · Tối ưu OCR accuracy-first · Tối đa 10 ảnh/lượt · Lọc đúng 9 nhân viên có ảnh KPI · Xuất 6 Sheet")
     st.warning("Ưu tiên độ chính xác: OCR chỉ là bản nháp. Chỉ dùng dữ liệu đã được người dùng đối chiếu ảnh gốc.")
 
     with st.sidebar:
@@ -339,7 +415,7 @@ def main():
         drive_url = st.text_input(
             "① Link Google Drive chứa ảnh báo cáo",
             placeholder="Dán link chia sẻ của một file ảnh Google Drive công khai tại đây",
-            help="V1.1 hỗ trợ link file ảnh được chia sẻ công khai/bất kỳ ai có đường liên kết. Chưa hỗ trợ link thư mục hoặc file Drive riêng tư."
+            help="V1.2 hỗ trợ link file ảnh được chia sẻ công khai/bất kỳ ai có đường liên kết. Chưa hỗ trợ link thư mục hoặc file Drive riêng tư."
         )
         st.caption("Có thể dùng link Google Drive, tải ảnh trực tiếp hoặc tải ZIP. Có thể kết hợp các nguồn trong cùng một lượt.")
 
@@ -358,7 +434,7 @@ def main():
                 if not items:
                     raise ValueError("Anh chưa dán link Google Drive hoặc chọn ảnh/ZIP.")
                 if len(items) > MAX_FILES:
-                    raise ValueError("Tổng số ảnh từ các nguồn vượt 30.")
+                    raise ValueError("V1.2 giới hạn tối đa 10 ảnh mỗi lượt.")
                 # Recalculate duplicate flags across all input sources.
                 seen_hashes = {}
                 for item in items:
@@ -375,28 +451,46 @@ def main():
             except Exception as exc:
                 st.error(str(exc))
         items = st.session_state.get("items", [])
-        if items and st.button("Chạy OCR 6 phương án", type="secondary"):
+        if items:
+            st.caption("V1.2: tối đa 10 ảnh/lượt · OCR chính 1 lần/ảnh · chỉ OCR bổ sung khi phát hiện rủi ro · cache ảnh đã xử lý.")
+        if items and st.button("Chạy OCR tối ưu – ưu tiên chính xác", type="secondary"):
             out, progress = [], st.progress(0)
+            status = st.empty()
+            batch_started = time.perf_counter()
             for i, item in enumerate(items):
+                status.info(f"Đang xử lý ảnh {i+1}/{len(items)}: {item['name']}")
                 try:
-                    out.append(process_one(item))
+                    result = process_one(item)
+                    out.append(result)
+                    status.caption(f"Ảnh {i+1}: {result.get('ocr_seconds', 0):.1f}s · {result.get('ocr_attempt_count', 1)} lượt OCR · confidence {result.get('confidence', 0):.1f}%")
                 except Exception as exc:
                     out.append({"name": item["name"], "source": item["source"], "sha256": item["sha256"],
                         "text": "", "confidence": 0, "variant": "LỖI", "psm": 0,
-                        "warnings": [str(exc)], "words": [], "attempts": [], "reviewed": False, "review_note": ""})
+                        "warnings": [str(exc)], "words": [], "attempts": [], "reviewed": False,
+                        "review_note": "", "ocr_seconds": 0, "ocr_attempt_count": 0, "needs_review": True})
                 progress.progress((i+1)/len(items))
             st.session_state["results"] = out
-            st.success("OCR hoàn tất. Hãy đối chiếu ảnh gốc trước khi xác nhận.")
+            total_seconds = time.perf_counter() - batch_started
+            total_attempts = sum(r.get("ocr_attempt_count", 0) for r in out)
+            risk_count = sum(bool(r.get("warnings")) for r in out)
+            status.empty()
+            st.success(f"OCR hoàn tất: {len(out)} ảnh · {total_attempts} lượt OCR · {total_seconds:.1f} giây. Có {risk_count} ảnh cần chú ý/đối chiếu.")
         results = st.session_state.get("results", [])
         for i, result in enumerate(results):
             with st.expander(f"{i+1}. {result['name']} · OCR {result['confidence']}%", expanded=(i == 0)):
                 st.image(items[i]["bytes"], use_container_width=True)
+                st.caption(f"Phương án: {result.get('variant', '—')} · PSM {result.get('psm', '—')} · {result.get('ocr_seconds', 0):.1f}s · {result.get('ocr_attempt_count', 0)} lượt OCR")
                 st.text_area("Văn bản OCR – có thể chỉnh sửa", result["text"], height=180, key=f"ocr_text_{i}")
                 result["text"] = st.session_state.get(f"ocr_text_{i}", result["text"])
                 result["reviewed"] = st.checkbox("Đã đối chiếu với ảnh gốc", key=f"review_{i}")
                 result["review_note"] = st.text_input("Ghi chú", key=f"review_note_{i}")
                 for warning in result["warnings"]:
                     st.warning(warning)
+                if len(result.get("attempts", [])) > 1:
+                    with st.expander("So sánh các phương án OCR bổ sung"):
+                        for attempt_no, attempt in enumerate(result["attempts"], start=1):
+                            st.markdown(f"**Phương án {attempt_no}: {attempt['variant']} · PSM {attempt['psm']} · {attempt['confidence']:.1f}% · {attempt.get('seconds', 0):.1f}s**")
+                            st.text(attempt["text"][:12000] or "Không nhận diện được văn bản.")
 
     with tab2:
         st.markdown("### Danh sách 9 nhân viên có ảnh KPI")
@@ -422,7 +516,7 @@ def main():
             height=180, key="matrix_tsv", placeholder="NHÂN VIÊN\\tĐIỆN TỬ SAMSUNG\\tCE LG\\tTIVI TCL\\nNguyễn Ngọc Tân - 137502\\t13.00\\t21.30\\t5.73")
         revenue_text = st.text_area("D. DOANH THU – đúng 5 cột theo yêu cầu",
             height=130, key="revenue_tsv", placeholder="NHÂN VIÊN\\tDOANH THU QĐ\\tLƯỢT BILL\\t% TRẢ CHẬM\\tĐIỂM THƯỞNG ERP")
-        st.info("V1.1 chưa tự chuyển ảnh thành bảng nghiệp vụ hoàn chỉnh. Đây là bước nhập dữ liệu đã xác minh để tránh tự suy đoán cấu trúc bảng. OCR thô vẫn được lưu trong DATA_GOC.")
+        st.info("V1.2 chưa tự chuyển ảnh thành bảng nghiệp vụ hoàn chỉnh. Đây là bước nhập dữ liệu đã xác minh để tránh tự suy đoán cấu trúc bảng. OCR thô vẫn được lưu trong DATA_GOC.")
 
     with tab3:
         st.markdown("### Kiểm tra điều kiện xuất")
@@ -493,7 +587,7 @@ def main():
             st.success("Đã tạo workbook 6 Sheet. Kiểm tra CANH_BAO trước khi sử dụng báo cáo.")
 
     st.divider()
-    st.caption("ĐMX SMART REPORT AI · V1.1 nền tảng nghiệp vụ · OCR không thay thế xác minh thủ công.")
+    st.caption("ĐMX SMART REPORT AI · V1.2 · OCR không thay thế xác minh thủ công; dữ liệu chỉ được xuất sau khi đối chiếu.")
 
 if __name__ == "__main__":
     main()

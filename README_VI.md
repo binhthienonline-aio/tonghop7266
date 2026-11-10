@@ -41,3 +41,13 @@ Hiện chỉ có 2 ảnh KPI mẫu được cung cấp (137502 và 181846). Trư
 
 ## Bảo mật
 Dữ liệu được xử lý trên máy chủ Streamlit Community Cloud. Không tải dữ liệu nội bộ nếu chưa được tổ chức cho phép. Mật khẩu dùng chung chưa thay thế đăng nhập cá nhân/phân quyền.
+
+
+## V1.2 – Tối ưu OCR ưu tiên chính xác
+- Giới hạn tối đa 10 ảnh trong một lượt xử lý.
+- OCR chính chạy một lần/ảnh bằng `image_to_data`; văn bản, vị trí từ và confidence được lấy từ cùng một kết quả, không gọi thêm `image_to_string`.
+- Chỉ chạy tối đa 2 lượt OCR bổ sung khi kết quả chính có confidence thấp, quá ít từ/ký tự hoặc có mẫu ký tự dễ nhầm.
+- Cache kết quả theo nội dung ảnh (SHA-256 thông qua cache key), để ảnh không đổi không phải OCR lại trong cùng môi trường cache.
+- Hiển thị thời gian và số lượt OCR theo từng ảnh; lỗi một ảnh không làm dừng cả lô.
+- OCR vẫn là bản nháp. Confidence không đồng nghĩa độ chính xác; phải đối chiếu ảnh gốc trước khi xác nhận và xuất Excel.
+- Không tự động sửa hoặc suy diễn số liệu.
