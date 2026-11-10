@@ -334,11 +334,38 @@ def main():
         dump_date = st.date_input("Ngày đổ số", value=date.today(), help="Ngày dữ liệu tự động = ngày đổ số - 1 ngày; không dùng giờ.")
         st.session_state["dump_date"] = dump_date
         st.info(f"Ngày dữ liệu sẽ là: **{normalize_date(dump_date).strftime('%d/%m/%Y')}**")
-        uploads = st.file_uploader("Tải ảnh báo cáo (có thể chọn nhiều)", type=["jpg","jpeg","png","webp","bmp","tif","tiff"], accept_multiple_files=True)
-        zip_upload = st.file_uploader("Hoặc tải ZIP chứa ảnh", type=["zip"])
+
+        # Google Drive link is intentionally placed first, above local uploads.
+        drive_url = st.text_input(
+            "① Link Google Drive chứa ảnh báo cáo",
+            placeholder="Dán link chia sẻ của một file ảnh Google Drive công khai tại đây",
+            help="V1.1 hỗ trợ link file ảnh được chia sẻ công khai/bất kỳ ai có đường liên kết. Chưa hỗ trợ link thư mục hoặc file Drive riêng tư."
+        )
+        st.caption("Có thể dùng link Google Drive, tải ảnh trực tiếp hoặc tải ZIP. Có thể kết hợp các nguồn trong cùng một lượt.")
+
+        uploads = st.file_uploader("② Tải ảnh báo cáo từ máy tính (có thể chọn nhiều)", type=["jpg","jpeg","png","webp","bmp","tif","tiff"], accept_multiple_files=True)
+        zip_upload = st.file_uploader("③ Hoặc tải ZIP chứa ảnh", type=["zip"])
         if st.button("Nạp ảnh", type="primary"):
             try:
-                items = load_image_items(uploads or [], zip_upload)
+                items = []
+                if drive_url.strip():
+                    drive_item = fetch_public_drive_file(drive_url.strip())
+                    items.append(drive_item)
+                if (uploads or []) or zip_upload is not None:
+                    local_items = load_image_items(uploads or [], zip_upload)
+                    items.extend(local_items)
+
+                if not items:
+                    raise ValueError("Anh chưa dán link Google Drive hoặc chọn ảnh/ZIP.")
+                if len(items) > MAX_FILES:
+                    raise ValueError("Tổng số ảnh từ các nguồn vượt 30.")
+                # Recalculate duplicate flags across all input sources.
+                seen_hashes = {}
+                for item in items:
+                    item["sha256"] = sha256(item["bytes"])
+                    item["duplicate_of"] = seen_hashes.get(item["sha256"], "")
+                    seen_hashes.setdefault(item["sha256"], item["name"])
+
                 st.session_state["items"] = items
                 st.session_state.pop("results", None)
                 st.success(f"Đã nạp {len(items)} ảnh.")
