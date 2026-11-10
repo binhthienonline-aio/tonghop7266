@@ -85,9 +85,9 @@ def load_image_items(uploaded_files: list[Any], zip_upload: Any | None) -> list[
                     raise ValueError("Tổng ảnh sau giải nén vượt 60 MB.")
                 items.append({"name": info.filename, "bytes": zf.read(info), "source": "ZIP"})
                 if len(items) > MAX_FILES:
-                    raise ValueError("V1.2 giới hạn tối đa 10 ảnh mỗi lượt.")
+                    raise ValueError("V1.4 giới hạn tối đa 10 ảnh mỗi lượt.")
     if len(items) > MAX_FILES:
-        raise ValueError("V1.2 giới hạn tối đa 10 ảnh mỗi lượt.")
+        raise ValueError("V1.4 giới hạn tối đa 10 ảnh mỗi lượt.")
     if not items:
         raise ValueError("Chưa có ảnh hợp lệ.")
     seen = {}
@@ -381,7 +381,7 @@ def save_wb(wb: Workbook) -> bytes:
 
 # ---------- UI V1.3: automatic extraction ----------
 def main():
-    from auto_extract import build_auto_tables, EMPLOYEE_NAME_BY_ID, GROUPS
+    from auto_extract import build_auto_tables, EMPLOYEE_NAME_BY_ID, GROUPS, is_staff_image
     require_password()
     st.markdown("""
     <style>
@@ -396,7 +396,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     st.title("ĐMX SMART REPORT AI")
-    st.caption("V1.3 BETA · Tự động phân tích 1 ảnh Tập thể + 9 ảnh KPI · Tối đa 10 ảnh/lượt · Xuất 6 Sheet")
+    st.caption("V1.4 BETA · Tự động phân tích 1 ảnh Tập thể + 9 ảnh KPI · Tối đa 10 ảnh/lượt · Xuất 6 Sheet")
     st.warning("OCR và bộ phân tích tự động là bản nháp. Các trường không chắc chắn được đánh dấu KHÔNG CÓ DATA/CẦN KIỂM TRA; phải đối chiếu ảnh gốc trước khi dùng báo cáo.")
 
     with st.sidebar:
@@ -415,7 +415,7 @@ def main():
         drive_url=st.text_input("① Link Google Drive ảnh/ZIP công khai",placeholder="Dán link file được chia sẻ công khai")
         uploads=st.file_uploader("② Tải ảnh trực tiếp (có thể chọn nhiều)",type=["jpg","jpeg","png","webp","bmp","tif","tiff"],accept_multiple_files=True)
         zip_upload=st.file_uploader("③ Tải ZIP chứa đúng 10 ảnh",type=["zip"])
-        st.caption("Đầu vào yêu cầu: 1 ảnh LuyKe.JPG + 9 ảnh suc-khoe-nv-[mã]-202611.png. Hiện chưa hỗ trợ link thư mục/private Google Drive hoặc file 7Z trực tiếp.")
+        st.caption("Đầu vào yêu cầu: 1 ảnh 1 ảnh Tập thể (không bắt buộc tên LuyKe) + 9 ảnh suc-khoe-nv-[mã]-202611.png. Hiện chưa hỗ trợ link thư mục/private Google Drive hoặc file 7Z trực tiếp.")
         if st.button("NẠP ẢNH",type="primary"):
             try:
                 items=[]
@@ -440,8 +440,8 @@ def main():
 
         items=st.session_state.get("items",[])
         if items:
-            group_names=[x["name"] for x in items if "luyke" in x["name"].lower()]
-            staff_names=[x["name"] for x in items if "suc-khoe-nv-" in x["name"].lower()]
+            group_names=[x["name"] for x in items if not is_staff_image(x["name"])]
+            staff_names=[x["name"] for x in items if is_staff_image(x["name"])]
             st.write(f"Ảnh Tập thể nhận diện theo tên file: **{len(group_names)}/1** · Ảnh KPI nhận diện theo tên file: **{len(staff_names)}/9**")
             if st.button("CHẠY OCR & PHÂN TÍCH TỰ ĐỘNG",type="primary"):
                 out=[]; progress=st.progress(0); status=st.empty(); began=time.perf_counter()
@@ -449,7 +449,7 @@ def main():
                     status.info(f"OCR ảnh {i+1}/10: {item['name']}")
                     try:
                         # Group table is extracted by cell geometry below; avoid a redundant full-page OCR pass.
-                        if "luyke" in item["name"].lower():
+                        if not is_staff_image(item["name"]):
                             result={"name":item["name"],"source":item["source"],"sha256":item["sha256"],
                                     "text":"Ảnh Tập thể: dữ liệu được trích xuất theo từng ô bảng 38 dòng.",
                                     "confidence":0.0,"variant":"Trích xuất ô bảng","psm":"CELL",
@@ -468,7 +468,7 @@ def main():
                 try:
                     tables=build_auto_tables(out,items)
                     for rr in out:
-                        if "luyke" in rr["name"].lower():
+                        if not is_staff_image(rr["name"]):
                             rr["text"] = tables["group_df"].to_csv(sep="\t", index=False)
                             rr["variant"] = "OCR theo từng ô bảng (38 dòng)"
                     st.session_state["results"]=out
@@ -544,6 +544,6 @@ def main():
                 st.success("Đã tạo Excel 6 Sheet. Các trường còn thiếu đã được giữ cảnh báo trong CANH_BAO.")
 
     st.divider()
-    st.caption("ĐMX SMART REPORT AI · V1.3 BETA · Tự động phân tích từ 10 ảnh. Kết quả OCR chưa phải dữ liệu đã xác minh.")
+    st.caption("ĐMX SMART REPORT AI · V1.4 BETA · Tự động phân tích từ 10 ảnh. Kết quả OCR chưa phải dữ liệu đã xác minh.")
 if __name__=="__main__":
     main()

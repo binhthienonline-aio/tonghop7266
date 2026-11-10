@@ -38,6 +38,27 @@ STAFF_COLUMNS = [
 ]
 REVENUE_COLUMNS = ["NHÂN VIÊN","DOANH THU QĐ","LƯỢT BILL","% TRẢ CHẬM","ĐIỂM THƯỞNG ERP"]
 
+
+def employee_id_from_filename(filename: str) -> str:
+    """Extract the employee code only from the explicit KPI filename pattern."""
+    m = re.search(r"suc[-_ ]?khoe[-_ ]?nv[-_ ]?(\d{4,8})", Path(filename).name, re.I)
+    return m.group(1) if m else ""
+
+
+def is_staff_image(filename: str) -> bool:
+    return bool(employee_id_from_filename(filename))
+
+
+def is_group_image(filename: str, items: list[dict] | None = None) -> bool:
+    """Identify the single non-staff image in the fixed 1+9 input batch.
+
+    The group report may be named IMG_5606.JPG; filename 'LuyKe' is not required.
+    Content is separately validated by the table geometry and row extraction.
+    """
+    if not is_staff_image(filename) and items is not None:
+        return sum(1 for it in items if not is_staff_image(it.get("name", ""))) == 1
+    return not is_staff_image(filename)
+
 def _norm(s: str) -> str:
     s = unicodedata.normalize("NFD", str(s).lower())
     s = "".join(c for c in s if unicodedata.category(c) != "Mn")
@@ -127,67 +148,118 @@ def _pick_metric(lines, anchor, index=1, allow_percent=False):
         if v is not None: vals.append(v)
     return vals[index] if len(vals)>index else None
 
-def extract_staff(raw_text: str, filename: str) -> tuple[dict,list[str]]:
+def _crop_ocr_values(raw: bytes, box: tuple[float,float,float,float], percent: bool=False) -> list[float]:
+    """OCR a fixed KPI card crop; return numeric tokens in reading order."""
+    arr=np.frombuffer(raw,dtype=np.uint8)
+    bgr=cv2.imdecode(arr,cv2.IMREAD_COLOR)
+    if bgr is None: return []
+    h,w=bgr.shape[:2]
+    x1,y1,x2,y2=box
+    crop=bgr[int(y1*h):int(y2*h),int(x1*w):int(x2*w)]
+    if crop.size==0: return []
+    gray=cv2.cvtColor(crop,cv2.COLOR_BGR2GRAY)
+    gray=cv2.resize(gray,None,fx=3.0,fy=3.0,interpolation=cv2.INTER_CUBIC)
+    gray=cv2.createCLAHE(clipLimit=2.0,tileGridSize=(4,4)).apply(gray)
+    text=pytesseract.image_to_string(gray,lang="vie+eng",config="--oem 1 --psm 6",timeout=20)
+    tokens=re.findall(r"(?<![A-Za-z])\d[\d,]*(?:\.\d+)?%?(?![A-Za-z])",text)
+    vals=[]
+    for token in tokens:
+        if percent and "%" not in token: continue
+        if not percent and "%" in token: continue
+        value=_num(token)
+        if value is not None: vals.append(value)
+    return vals
+
+
+def extract_staff(raw_text: str, filename: str, image_bytes: bytes | None = None) -> tuple[dict,list[str]]:
     warnings=[]
-    m=re.search(r"(?:suc-khoe-nv-)?(\d{4,8})",filename,re.I)
-    emp_id=m.group(1) if m else ""
+    emp_id=employee_id_from_filename(filename)
     lines=[re.sub(r"\s+"," ",x).strip() for x in raw_text.splitlines() if x.strip()]
+    norm_lines=[_norm(x) for x in lines]
     name=EMPLOYEE_NAME_BY_ID.get(emp_id,"KHÔNG CÓ DATA")
     rank=None; completion=None
-    for line in lines[:8]:
-        rm=re.search(r"Hạng\s*(\d+)\s*/\s*9",line,re.I)
+    for line in lines[:12]:
+        rm=re.search(r"H[aạ]ng\s*(\d+)\s*/\s*9",line,re.I)
         if rm: rank=int(rm.group(1))
-        cm=re.search(r"Hoàn thành\s*(\d{1,3})\s*%",line,re.I)
+        cm=re.search(r"Ho[aà]n th[aà]nh\s*(\d{1,3})\s*%",line,re.I)
         if cm: completion=float(cm.group(1))
-    # Revenue line is the first numeric line after the revenue column headings.
-    revenue_line=""
-    for i,line in enumerate(lines):
-        if line.upper().startswith("DOANH THU QD") or line.upper().startswith("DOANH THU."):
-            for nxt in lines[i+1:i+4]:
-                if "195.0" in nxt or "437.9" in nxt or "tr" in nxt.lower():
-                    revenue_line=nxt; break
-            if revenue_line: break
-    nums=_numbers(revenue_line)
-    revenue=None; bills=None; target_pct=None
-    try:
-        idx=next(i for i,tok in enumerate(nums) if abs((_num(tok) or -999)-195.0)<0.01)
-        revenue=_num(nums[idx+1])
-    except (StopIteration,IndexError):
-        pass
-    try:
-        idx=next(i for i,tok in enumerate(nums) if abs((_num(tok) or -999)-437.9)<0.01 or tok=="437")
-        if idx+1 < len(nums) and nums[idx+1].isdigit():
-            target_pct=float(nums[idx+1])
-    except StopIteration:
-        pass
-    try:
-        idx=next(i for i,tok in enumerate(nums) if _num(tok)==45.0)
-        bills=_num(nums[idx+1])
-    except (StopIteration,IndexError):
-        pass
 
-    def following_values(prefix, count=3):
-        for i,line in enumerate(lines):
-            if re.match(prefix, line, re.I):
-                text=" ".join(lines[i+1:i+4])
-                return text
-        return ""
-    pct_line=following_values(r"%\s*QUY\s*Đ[ỒỔO]I")
-    def value_after_benchmark(benchmark):
-        m=re.search(str(benchmark) + r"\s*%?\s*(\d{1,3})", pct_line)
-        return float(m.group(1)) if m else None
-    quydoi=value_after_benchmark(47)
-    tracham=value_after_benchmark(49)
-    bankem=value_after_benchmark(63)
+    # Read the six KPI cards by their nearby label/value lines. OCR often merges
+    # card headings, so anchors are normalized and values are selected by order.
+    revenue=None; target_pct=None; bills=None
+    for i,nline in enumerate(norm_lines):
+        if "doanh thu qd" in nline and ("target" in nline or "luot bill" in nline):
+            block=" ".join(lines[i+1:i+5])
+            toks=_numbers(block)
+            # Reference values are printed as comparison benchmarks on the same card.
+            vals=[(_num(t),t) for t in toks]
+            for j,(v,tok) in enumerate(vals):
+                if v is not None and abs(v-195.0)<0.2 and j+1<len(vals):
+                    revenue=vals[j+1][0]; break
+            for j,(v,tok) in enumerate(vals):
+                if v is not None and abs(v-437.9)<0.3 and j+1<len(vals):
+                    target_pct=vals[j+1][0]; break
+            for j,(v,tok) in enumerate(vals):
+                if v is not None and abs(v-45.0)<0.2 and j+1<len(vals):
+                    bills=vals[j+1][0]; break
+            break
 
-    productivity=following_values("DIEM THƯỜNG ERP")
-    # Values in order: benchmark ERP, actual ERP, benchmark points/hour, actual,
-    # benchmark DTQĐ/hour, actual. Select even-indexed actual positions.
-    pnums=[_num(x) for x in _numbers(productivity)]
-    pnums=[x for x in pnums if x is not None]
-    erp=pnums[1] if len(pnums)>1 else None
-    bonus_hour=pnums[3] if len(pnums)>3 else None
-    dt_hour=pnums[5] if len(pnums)>5 else None
+    def card_percent(anchor: str, benchmark: float):
+        for i,nline in enumerate(norm_lines):
+            if anchor in nline:
+                block=" ".join(lines[i+1:i+4])
+                vals=[]
+                for token in _numbers(block):
+                    if "%" in token:
+                        v=_num(token)
+                        if v is not None: vals.append(v)
+                # The first percentage is the store benchmark; the second is employee actual.
+                return vals[1] if len(vals)>=2 else None
+        return None
+
+    quydoi=card_percent("quy doi",47.0)
+    tracham=card_percent("tra cham",49.0)
+    bankem=card_percent("ban kem",63.0)
+
+    erp=bonus_hour=dt_hour=None
+    for i,nline in enumerate(norm_lines):
+        if "diem thuong erp" in nline:
+            block=" ".join(lines[i+1:i+5])
+            pnums=[]
+            for token in _numbers(block):
+                if "%" in token: continue
+                v=_num(token)
+                if v is not None: pnums.append(v)
+            # Pairs are benchmark then actual for ERP, points/hour, and revenue/hour.
+            if len(pnums)>=2: erp=pnums[1]
+            if len(pnums)>=4: bonus_hour=pnums[3]
+            if len(pnums)>=6: dt_hour=pnums[5]
+            break
+
+    # V1.4 accuracy path: fixed card crops are more reliable than parsing a full-page OCR stream.
+    # The 9 employee dashboards share the same visual layout and aspect ratio.
+    if image_bytes:
+        crop_specs={
+            "revenue":(0.03,0.18,0.345,0.235),
+            "target":(0.345,0.18,0.66,0.235),
+            "bills":(0.66,0.18,0.97,0.235),
+            "quydoi":(0.03,0.22,0.345,0.285),
+            "tracham":(0.345,0.22,0.66,0.285),
+            "bankem":(0.66,0.22,0.97,0.285),
+            "erp":(0.03,0.30,0.345,0.365),
+            "bonus_hour":(0.345,0.30,0.66,0.365),
+            "dt_hour":(0.66,0.30,0.97,0.365),
+        }
+        vals={k:_crop_ocr_values(image_bytes,b,percent=(k in {"target","quydoi","tracham","bankem"})) for k,b in crop_specs.items()}
+        if len(vals["revenue"])>=2: revenue=vals["revenue"][-1]
+        if vals["target"]: target_pct=vals["target"][-1]
+        if len(vals["bills"])>=2: bills=vals["bills"][-1]
+        if vals["quydoi"]: quydoi=vals["quydoi"][-1]
+        if vals["tracham"]: tracham=vals["tracham"][-1]
+        if vals["bankem"]: bankem=vals["bankem"][-1]
+        if len(vals["erp"])>=2: erp=vals["erp"][-1]
+        if len(vals["bonus_hour"])>=2: bonus_hour=vals["bonus_hour"][-1]
+        if len(vals["dt_hour"])>=2: dt_hour=vals["dt_hour"][-1]
 
     data={
         "MÃ NHÂN VIÊN":emp_id or "KHÔNG CÓ DATA","NHÂN VIÊN":name,
@@ -273,11 +345,8 @@ def extract_thidua(raw_text: str, employee_id: str) -> tuple[dict,list[str]]:
 
 def build_auto_tables(results: list[dict], items: list[dict]) -> dict:
     by_name={r["name"]:r for r in results}
-    group_items=[it for it in items if "luyke" in it["name"].lower() or "tập thể" in it["name"].lower() or "tap the" in it["name"].lower()]
-    staff_items=[]
-    for it in items:
-        if it not in group_items:
-            staff_items.append(it)
+    staff_items=[it for it in items if is_staff_image(it["name"])]
+    group_items=[it for it in items if not is_staff_image(it["name"])]
     warnings=[]
     if len(items)!=10: warnings.append(f"Cần đúng 10 ảnh (1 Tập thể + 9 cá nhân); hiện có {len(items)} ảnh.")
     if len(group_items)!=1: warnings.append(f"Cần nhận diện đúng 1 ảnh Tập thể qua tên file LuyKe; nhận diện được {len(group_items)}.")
@@ -290,7 +359,7 @@ def build_auto_tables(results: list[dict], items: list[dict]) -> dict:
         result=by_name.get(it["name"])
         if not result:
             warnings.append(f"Chưa có kết quả OCR cho {it['name']}."); continue
-        data,ww=extract_staff(result.get("text",""),it["name"]); warnings.extend(ww)
+        data,ww=extract_staff(result.get("text",""),it["name"],it.get("bytes")); warnings.extend(ww)
         emp_id=str(data["MÃ NHÂN VIÊN"])
         if emp_id in seen: warnings.append(f"Trùng mã nhân viên {emp_id}.")
         seen.add(emp_id); staff_rows.append(data)

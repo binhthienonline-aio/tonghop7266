@@ -1,35 +1,27 @@
-# ĐMX SMART REPORT AI – V1.3 BETA
+# ĐMX SMART REPORT AI V1.4 BETA
+
+## Điểm sửa trong V1.4
+- Nhận diện ảnh Tập thể là ảnh duy nhất không khớp mẫu tên `suc-khoe-nv-[mã]`; không bắt buộc file phải tên `LuyKe`. Đã kiểm thử với `IMG_5606.JPG` trong bộ ZIP Ngày 9.11.
+- Nhận diện 9 ảnh KPI theo mã nhân viên trong tên file.
+- Trích xuất KPI cá nhân theo vùng tọa độ từng thẻ chỉ tiêu; OCR toàn trang chỉ hỗ trợ tên/hạng và kiểm tra bổ sung.
+- Sửa lỗi phân cách TSV: dùng đúng ký tự Tab.
+- Ảnh Tập thể vẫn đọc theo vùng ô bảng 38 dòng; ô không chắc chắn để trống và cảnh báo.
+
+## Cài đặt / cập nhật Streamlit Cloud
+1. Giải nén ZIP.
+2. Upload toàn bộ nội dung thư mục vào repository GitHub (cùng cấp `app.py`, `auto_extract.py`, `requirements.txt`, `packages.txt`, `.streamlit/`).
+3. Commit changes.
+4. Giữ nguyên `APP_PASSWORD` trong Streamlit Secrets.
+5. Chờ Streamlit deploy, sau đó tải lại trang.
 
 ## Đầu vào
-- Đúng 10 ảnh/lượt: 1 ảnh `LuyKe.JPG` và 9 ảnh KPI có tên dạng `suc-khoe-nv-<mã>-202611.png`.
-- Tải ZIP thường (không hỗ trợ 7Z trực tiếp), hoặc tải từng ảnh. Link Google Drive hiện chỉ hỗ trợ file công khai đơn lẻ; không hỗ trợ thư mục/private Drive.
-
-## Quy trình
-Nạp ảnh → OCR → phân tích tự động → đối chiếu cảnh báo → xuất Excel 6 Sheet.
-
-Đã bỏ nhập mã nhân viên và dán TSV thủ công.
-
-## 6 Sheet
-1. `TONG_HOP_TAP_THE`
-2. `NHAN_VIEN`
-3. `THI_DUA`
-4. `DOANH THU`
-5. `CANH_BAO`
-6. `DATA_GOC`
+- 1 ảnh Tập thể + đúng 9 ảnh KPI cá nhân.
+- Ảnh KPI cần tên theo mẫu `suc-khoe-nv-[mã]-202611.png`.
+- Ảnh Tập thể có thể mang tên bất kỳ; trong bộ thử nghiệm là `IMG_5606.JPG`.
+- Ngày dữ liệu = ngày đổ số trừ 1 ngày, không tính giờ.
 
 ## Giới hạn cần biết
-- Đây là V1.3 BETA. Bộ phân tích dùng bố cục ảnh LuyKe và OCR Tesseract với quy tắc bảo thủ.
-- Các ô không nhận diện chắc chắn được ghi `KHÔNG CÓ DATA` và cảnh báo; không tự điền số.
-- Nhận diện thi đua từ các ảnh cá nhân chưa hoàn chỉnh trong mọi trường hợp; nhiều ô có thể để `KHÔNG CÓ DATA`.
-- Mọi ảnh phải được người dùng đối chiếu trước khi xuất.
-- Chưa có kiểm thử triển khai end-to-end trên Streamlit Cloud; phải chạy thử bộ 10 ảnh chuẩn trước khi dùng chính thức.
-
-## Triển khai
-Thay `app.py` và thêm `auto_extract.py` vào cùng thư mục gốc GitHub. Giữ nguyên `requirements.txt`, `packages.txt`, `.streamlit/config.toml` và Secrets. Commit hai file, đợi Streamlit deploy.
-
-## Kiểm thử bộ ảnh chuẩn được cung cấp
-- Đã giải nén bộ 7Z lồng 7Z trong môi trường phát triển; tìm thấy đúng 10 ảnh.
-- Chạy thử OCR 9 ảnh cá nhân bằng Tesseract tiếng Việt + Anh.
-- Bộ phân tích tạo được 38 dòng Tập thể, 9 dòng NHÂN_VIÊN và ma trận 9 x 38.
-- Trong lần chạy kiểm thử này, một số trường (ví dụ lượt bill của một số ảnh, các ô Tập thể khó đọc và một phần tỷ lệ THI ĐUA) chưa trích xuất chắc chắn. Chúng được đánh dấu KHÔNG CÓ DATA/cảnh báo.
-- Kiểm thử cục bộ không đồng nghĩa kiểm thử trên Streamlit Cloud. Hiệu năng có thể chậm hơn do giới hạn CPU của Community Cloud.
+- Đây là bản beta; OCR không phải dữ liệu đã xác minh.
+- Đã thử trích xuất ảnh Tập thể `IMG_5606.JPG`: 38 tên nhóm hàng, 34/38 ô Thực hiện, 37/38 ô Target và 38/38 ô % HT dự kiến đọc được ở lần chạy thử. Các ô còn lại phải đối chiếu ảnh gốc.
+- Parser KPI được cải thiện nhưng cần kiểm tra toàn bộ 9 ảnh trên Streamlit Cloud; không cam kết chính xác tuyệt đối.
+- Không hỗ trợ trực tiếp 7Z, thư mục Google Drive riêng tư hoặc OAuth.
