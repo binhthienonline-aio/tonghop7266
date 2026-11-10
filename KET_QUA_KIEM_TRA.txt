@@ -1,0 +1,11 @@
+ĐMX SMART REPORT AI V1.3 BETA – KẾT QUẢ KIỂM TRA MÃ NGUỒN
+
+- app.py: Python compile PASS
+- auto_extract.py: Python compile PASS
+- Bộ ảnh thực tế đã được giải nén: 10 ảnh (1 LuyKe.JPG + 9 ảnh KPI)
+- Trích xuất bảng Tập thể: 38 dòng; trong lần kiểm thử cục bộ có 4 ô Thực hiện và 1 ô Target chưa đọc chắc chắn.
+- Trích xuất NHAN_VIEN: 9 nhân viên theo 9 mã file; 13 trường KPI được tạo, một số trường để KHÔNG CÓ DATA khi OCR không đủ chắc chắn.
+- THI_DUA: có trích xuất một phần; nhiều ô còn KHÔNG CÓ DATA và sẽ có cảnh báo.
+- Đã kiểm tra logic tạo 6 bảng dữ liệu trong pipeline; chưa kiểm thử Streamlit Cloud end-to-end vì môi trường build không cài Streamlit.
+- Không tuyên bố độ chính xác tuyệt đối. Phải đối chiếu ảnh gốc trước khi sử dụng số liệu.
+- Hạn chế đầu vào: ZIP thường hoặc 10 ảnh rời; 7Z trực tiếp chưa hỗ trợ. Google Drive chỉ hỗ trợ file công khai đơn lẻ.

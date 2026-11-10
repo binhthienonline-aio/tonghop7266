@@ -1,53 +1,35 @@
-# ĐMX SMART REPORT AI – STREAMLIT V1.1
+# ĐMX SMART REPORT AI – V1.3 BETA
 
-## Mục tiêu V1.1
-Nâng cấp nền tảng xuất Excel theo quy tắc nghiệp vụ đã xác nhận:
-- Chỉ lấy đúng 9 nhân viên có ảnh KPI cá nhân.
-- Dùng mã nhân viên làm khóa lọc ma trận THI_DUA.
-- Ngày dữ liệu = ngày đổ số - 1 ngày lịch; bỏ qua giờ.
-- Xuất đúng 6 Sheet theo thứ tự:
-  1. `TONG_HOP_TAP_THE`
-  2. `NHAN_VIEN`
-  3. `THI_DUA`
-  4. `DOANH THU`
-  5. `CANH_BAO`
-  6. `DATA_GOC`
-- `THI_DUA`: nhân viên ở cột đầu, Nhóm hàng là các cột tiếp theo; không tô màu.
-- `DOANH THU`: đúng thứ tự `NHÂN VIÊN`, `DOANH THU QĐ`, `LƯỢT BILL`, `% TRẢ CHẬM`, `ĐIỂM THƯỞNG ERP`.
-- Không tính số Thực hiện dự kiến tuyệt đối.
-- Không đổi dữ liệu thiếu thành 0.
+## Đầu vào
+- Đúng 10 ảnh/lượt: 1 ảnh `LuyKe.JPG` và 9 ảnh KPI có tên dạng `suc-khoe-nv-<mã>-202611.png`.
+- Tải ZIP thường (không hỗ trợ 7Z trực tiếp), hoặc tải từng ảnh. Link Google Drive hiện chỉ hỗ trợ file công khai đơn lẻ; không hỗ trợ thư mục/private Drive.
 
-## Lưu ý về mức độ tự động
-V1.1 đã triển khai bộ khung nghiệp vụ và quy tắc lọc 9 nhân viên, ngày dữ liệu, cấu trúc 6 Sheet. OCR vẫn tạo văn bản thô; người dùng phải dán bảng TSV đã đối chiếu vào bước nhập dữ liệu. V1.1 CHƯA tự trích xuất hoàn chỉnh bảng nhiều cột từ ảnh cá nhân/ma trận. Không được coi đây là tính năng đã hoàn thành.
+## Quy trình
+Nạp ảnh → OCR → phân tích tự động → đối chiếu cảnh báo → xuất Excel 6 Sheet.
 
-Hiện chỉ có 2 ảnh KPI mẫu được cung cấp (137502 và 181846). Trước khi xuất báo cáo thực tế cần nhập đủ 9 mã nhân viên có ảnh. Không tự tạo mã còn thiếu.
+Đã bỏ nhập mã nhân viên và dán TSV thủ công.
 
-## Cách triển khai
-1. Sao lưu repository hiện tại hoặc tạo branch `v1-1-business-rules`.
-2. Thay `app.py`, `requirements.txt`, `packages.txt` bằng các file trong gói này.
-3. Giữ `.streamlit/config.toml` và `.gitignore` hiện có nếu đã cấu hình đúng.
-4. Commit lên GitHub; Streamlit Cloud sẽ tự deploy.
-5. Kiểm tra Logs và chạy bộ thử trước khi dùng số liệu thật.
-6. Thêm `APP_PASSWORD` trong Streamlit Secrets.
+## 6 Sheet
+1. `TONG_HOP_TAP_THE`
+2. `NHAN_VIEN`
+3. `THI_DUA`
+4. `DOANH THU`
+5. `CANH_BAO`
+6. `DATA_GOC`
 
-## Kiểm thử tối thiểu
-- Ngày đổ số 09/11/2026 phải ra ngày dữ liệu 08/11/2026.
-- Chỉ có 8 hoặc 10 mã nhân viên: không cho xác nhận danh sách 9.
-- Mã nhân viên trùng: báo lỗi.
-- Ma trận có 11 người: chỉ giữ dòng của 9 mã trong danh sách KPI; không lấy dòng tổng nguồn làm tổng 9 người.
-- Target trống phải giữ trống, không biến thành 0.
-- `DOANH THU` phải có đúng 5 cột đúng thứ tự.
-- Workbook có đúng 6 Sheet và `THI_DUA` không tô màu.
+## Giới hạn cần biết
+- Đây là V1.3 BETA. Bộ phân tích dùng bố cục ảnh LuyKe và OCR Tesseract với quy tắc bảo thủ.
+- Các ô không nhận diện chắc chắn được ghi `KHÔNG CÓ DATA` và cảnh báo; không tự điền số.
+- Nhận diện thi đua từ các ảnh cá nhân chưa hoàn chỉnh trong mọi trường hợp; nhiều ô có thể để `KHÔNG CÓ DATA`.
+- Mọi ảnh phải được người dùng đối chiếu trước khi xuất.
+- Chưa có kiểm thử triển khai end-to-end trên Streamlit Cloud; phải chạy thử bộ 10 ảnh chuẩn trước khi dùng chính thức.
 
-## Bảo mật
-Dữ liệu được xử lý trên máy chủ Streamlit Community Cloud. Không tải dữ liệu nội bộ nếu chưa được tổ chức cho phép. Mật khẩu dùng chung chưa thay thế đăng nhập cá nhân/phân quyền.
+## Triển khai
+Thay `app.py` và thêm `auto_extract.py` vào cùng thư mục gốc GitHub. Giữ nguyên `requirements.txt`, `packages.txt`, `.streamlit/config.toml` và Secrets. Commit hai file, đợi Streamlit deploy.
 
-
-## V1.2 – Tối ưu OCR ưu tiên chính xác
-- Giới hạn tối đa 10 ảnh trong một lượt xử lý.
-- OCR chính chạy một lần/ảnh bằng `image_to_data`; văn bản, vị trí từ và confidence được lấy từ cùng một kết quả, không gọi thêm `image_to_string`.
-- Chỉ chạy tối đa 2 lượt OCR bổ sung khi kết quả chính có confidence thấp, quá ít từ/ký tự hoặc có mẫu ký tự dễ nhầm.
-- Cache kết quả theo nội dung ảnh (SHA-256 thông qua cache key), để ảnh không đổi không phải OCR lại trong cùng môi trường cache.
-- Hiển thị thời gian và số lượt OCR theo từng ảnh; lỗi một ảnh không làm dừng cả lô.
-- OCR vẫn là bản nháp. Confidence không đồng nghĩa độ chính xác; phải đối chiếu ảnh gốc trước khi xác nhận và xuất Excel.
-- Không tự động sửa hoặc suy diễn số liệu.
+## Kiểm thử bộ ảnh chuẩn được cung cấp
+- Đã giải nén bộ 7Z lồng 7Z trong môi trường phát triển; tìm thấy đúng 10 ảnh.
+- Chạy thử OCR 9 ảnh cá nhân bằng Tesseract tiếng Việt + Anh.
+- Bộ phân tích tạo được 38 dòng Tập thể, 9 dòng NHÂN_VIÊN và ma trận 9 x 38.
+- Trong lần chạy kiểm thử này, một số trường (ví dụ lượt bill của một số ảnh, các ô Tập thể khó đọc và một phần tỷ lệ THI ĐUA) chưa trích xuất chắc chắn. Chúng được đánh dấu KHÔNG CÓ DATA/cảnh báo.
+- Kiểm thử cục bộ không đồng nghĩa kiểm thử trên Streamlit Cloud. Hiệu năng có thể chậm hơn do giới hạn CPU của Community Cloud.
