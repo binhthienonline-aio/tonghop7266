@@ -469,7 +469,7 @@ def main():
                     tables=build_auto_tables(out,items)
                     for rr in out:
                         if "luyke" in rr["name"].lower():
-                            rr["text"] = tables["group_df"].to_csv(sep="\\t", index=False)
+                            rr["text"] = tables["group_df"].to_csv(sep="\t", index=False)
                             rr["variant"] = "OCR theo từng ô bảng (38 dòng)"
                     st.session_state["results"]=out
                     st.session_state["auto_tables"]=tables
