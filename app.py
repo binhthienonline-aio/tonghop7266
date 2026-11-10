@@ -381,7 +381,16 @@ def save_wb(wb: Workbook) -> bytes:
 
 # ---------- UI V1.3: automatic extraction ----------
 def main():
-    from auto_extract import build_auto_tables, EMPLOYEE_NAME_BY_ID, GROUPS, is_staff_image
+    from auto_extract import build_auto_tables, EMPLOYEE_NAME_BY_ID, GROUPS
+
+    # Compatibility guard: older deployed auto_extract.py files may not export
+    # is_staff_image even though the current app requires the filename classifier.
+    def is_staff_image(filename: str) -> bool:
+        return bool(re.search(
+            r"suc[-_ ]?khoe[-_ ]?nv[-_ ]?\d{4,8}",
+            Path(str(filename)).name,
+            re.IGNORECASE,
+        ))
     require_password()
     st.markdown("""
     <style>
