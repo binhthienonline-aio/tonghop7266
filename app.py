@@ -4,7 +4,8 @@ import hashlib
 import io
 import re
 import zipfile
-from dataclasses import dataclass
+from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -12,10 +13,9 @@ import numpy as np
 import pandas as pd
 import pytesseract
 import streamlit as st
-from PIL import Image, ImageOps
 from pytesseract import Output
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.styles import Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 APP_TITLE = "ĐMX SMART REPORT AI"
@@ -27,15 +27,15 @@ ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
 st.set_page_config(page_title=APP_TITLE, page_icon="📊", layout="wide")
 
+# ---------- Security / file intake ----------
 def require_password() -> None:
-    """Simple shared-password gate. Configure APP_PASSWORD in Streamlit Secrets."""
     try:
         expected = st.secrets.get("APP_PASSWORD", "")
     except Exception:
         expected = ""
     if not expected:
-        st.error("Ứng dụng chưa được cấu hình mật khẩu. Chủ ứng dụng hãy thêm APP_PASSWORD trong Streamlit → App settings → Secrets.")
-        st.code('APP_PASSWORD = "thay-bang-mat-khau-rieng-manh"')
+        st.error("Ứng dụng chưa được cấu hình APP_PASSWORD trong Streamlit Secrets.")
+        st.code('APP_PASSWORD = "mat-khau-rieng-cua-anh"')
         st.stop()
     if st.session_state.get("authenticated"):
         return
@@ -46,15 +46,11 @@ def require_password() -> None:
             st.session_state["authenticated"] = True
             st.rerun()
         st.error("Mật khẩu chưa đúng.")
-    st.caption("Đây là lớp khóa dùng chung cơ bản, không thay thế hệ thống tài khoản/phân quyền doanh nghiệp.")
+    st.caption("Mật khẩu dùng chung chỉ là lớp bảo vệ cơ bản, chưa phải phân quyền nhân viên.")
     st.stop()
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-def safe_name(name: str) -> str:
-    base = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
-    return (base or "image")[:100]
 
 def load_image_items(uploaded_files: list[Any], zip_upload: Any | None) -> list[dict]:
     items: list[dict] = []
@@ -73,7 +69,7 @@ def load_image_items(uploaded_files: list[Any], zip_upload: Any | None) -> list[
             for info in zf.infolist():
                 if info.is_dir():
                     continue
-                suffix = "." + info.filename.lower().rsplit(".", 1)[-1] if "." in info.filename else ""
+                suffix = Path(info.filename).suffix.lower()
                 if suffix not in ALLOWED_EXT:
                     continue
                 if info.file_size > MAX_IMAGE_BYTES:
@@ -81,88 +77,61 @@ def load_image_items(uploaded_files: list[Any], zip_upload: Any | None) -> list[
                     continue
                 expanded_total += info.file_size
                 if expanded_total > MAX_BATCH_EXPANDED_BYTES:
-                    raise ValueError("Tổng dung lượng ảnh sau giải nén vượt 60 MB. Hãy chia ZIP thành nhiều lượt.")
-                raw = zf.read(info)
-                items.append({"name": info.filename, "bytes": raw, "source": "ZIP"})
+                    raise ValueError("Tổng ảnh sau giải nén vượt 60 MB.")
+                items.append({"name": info.filename, "bytes": zf.read(info), "source": "ZIP"})
                 if len(items) > MAX_FILES:
-                    raise ValueError("Tổng số ảnh vượt 30. Hãy chia thành nhiều lượt.")
+                    raise ValueError("Tổng số ảnh vượt 30.")
     if len(items) > MAX_FILES:
-        raise ValueError("Tổng số ảnh vượt 30. Hãy chia thành nhiều lượt.")
+        raise ValueError("Tổng số ảnh vượt 30.")
     if not items:
-        raise ValueError("Chưa có ảnh hợp lệ. Hỗ trợ JPG, PNG, WEBP, BMP, TIF.")
-    # Duplicate bytes are flagged, not silently removed.
-    seen: dict[str, str] = {}
+        raise ValueError("Chưa có ảnh hợp lệ.")
+    seen = {}
     for item in items:
-        digest = sha256(item["bytes"])
-        item["sha256"] = digest
-        item["duplicate_of"] = seen.get(digest, "")
-        seen.setdefault(digest, item["name"])
+        item["sha256"] = sha256(item["bytes"])
+        item["duplicate_of"] = seen.get(item["sha256"], "")
+        seen.setdefault(item["sha256"], item["name"])
     return items
 
 def fetch_public_drive_file(url: str) -> dict:
-    """Download a public/shared Google Drive file only; private Drive OAuth is not implemented."""
     import gdown
     url = url.strip()
-    if not url:
-        raise ValueError("Chưa nhập link Google Drive.")
-    # Folder downloads are intentionally not automatic to avoid fetching an unknown number of files.
-    if "/folders/" in url:
-        raise ValueError("Bản V1 chỉ nhận link file ảnh Google Drive được chia sẻ công khai. Link thư mục/private Drive cần tích hợp OAuth riêng.")
+    if not url or "/folders/" in url:
+        raise ValueError("V1.1 chỉ hỗ trợ link file ảnh Google Drive công khai, không hỗ trợ thư mục/private Drive.")
     out = gdown.download(url=url, quiet=True, fuzzy=True)
     if not out:
-        raise ValueError("Không tải được file. Kiểm tra link chia sẻ công khai hoặc tải ảnh trực tiếp.")
-    from pathlib import Path
+        raise ValueError("Không tải được file Drive. Kiểm tra quyền chia sẻ.")
     p = Path(out)
     raw = p.read_bytes()
-    if p.suffix.lower() not in ALLOWED_EXT:
-        raise ValueError("File Drive tải về không phải định dạng ảnh được hỗ trợ.")
-    if len(raw) > MAX_IMAGE_BYTES:
-        raise ValueError("Ảnh Drive vượt 8 MB.")
-    return {"name": p.name, "bytes": raw, "source": "Google Drive công khai", "sha256": sha256(raw), "duplicate_of": ""}
+    if p.suffix.lower() not in ALLOWED_EXT or len(raw) > MAX_IMAGE_BYTES:
+        raise ValueError("File Drive không đúng định dạng ảnh hoặc vượt 8 MB.")
+    return {"name": p.name, "bytes": raw, "source": "Google Drive công khai",
+            "sha256": sha256(raw), "duplicate_of": ""}
 
+# ---------- OCR ----------
 def decode_image(raw: bytes) -> np.ndarray:
-    arr = np.frombuffer(raw, dtype=np.uint8)
-    image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    image = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
     if image is None:
-        raise ValueError("Không giải mã được ảnh. Kiểm tra định dạng hoặc file hỏng.")
+        raise ValueError("Không giải mã được ảnh.")
     return image
-
-def deskew(gray: np.ndarray) -> np.ndarray:
-    # Estimate skew using foreground pixels; conservative limit to avoid harmful rotations.
-    inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
-    coords = np.column_stack(np.where(inv > 0))
-    if len(coords) < 100:
-        return gray
-    angle = cv2.minAreaRect(coords)[-1]
-    if angle < -45:
-        angle = -(90 + angle)
-    else:
-        angle = -angle
-    if abs(angle) > 7 or abs(angle) < 0.15:
-        return gray
-    h, w = gray.shape[:2]
-    matrix = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
-    return cv2.warpAffine(gray, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
 
 def preprocess_variants(bgr: np.ndarray) -> list[tuple[str, np.ndarray]]:
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    gray = deskew(gray)
     h, w = gray.shape[:2]
     scale = 2.0 if max(h, w) < 2600 else 1.35
     enlarged = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(enlarged)
     otsu = cv2.threshold(clahe, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-    adaptive = cv2.adaptiveThreshold(clahe, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 11)
-    return [("Ảnh xám tăng nét", enlarged), ("CLAHE + Otsu", otsu), ("CLAHE + Adaptive", adaptive)]
+    adaptive = cv2.adaptiveThreshold(clahe, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                     cv2.THRESH_BINARY, 31, 11)
+    return [("Ảnh xám tăng kích thước", enlarged), ("CLAHE + Otsu", otsu),
+            ("CLAHE + Adaptive", adaptive)]
 
 def run_ocr(image: np.ndarray, psm: int) -> tuple[str, float, list[dict]]:
     config = f"--oem 1 --psm {psm}"
     data = pytesseract.image_to_data(image, lang="vie+eng", config=config, output_type=Output.DICT)
-    words: list[dict] = []
-    confs: list[float] = []
-    n = len(data["text"])
-    for i in range(n):
-        token = str(data["text"][i]).strip()
+    words, confs = [], []
+    for i, raw_token in enumerate(data["text"]):
+        token = str(raw_token).strip()
         try:
             conf = float(data["conf"][i])
         except (TypeError, ValueError):
@@ -174,385 +143,330 @@ def run_ocr(image: np.ndarray, psm: int) -> tuple[str, float, list[dict]]:
                 "left": int(data["left"][i]), "top": int(data["top"][i]),
                 "width": int(data["width"][i]), "height": int(data["height"][i]),
                 "block": int(data["block_num"][i]), "paragraph": int(data["par_num"][i]),
-                "line": int(data["line_num"][i]), "word": int(data["word_num"][i]),
+                "line": int(data["line_num"][i]), "word": int(data["word_num"][i])
             })
-    # Keep OCR's original line breaks from image_to_string as a second trace.
     text = pytesseract.image_to_string(image, lang="vie+eng", config=config)
-    avg = float(np.mean(confs)) if confs else 0.0
-    return text, avg, words
+    return text, (float(np.mean(confs)) if confs else 0.0), words
 
 def process_one(item: dict) -> dict:
     bgr = decode_image(item["bytes"])
-    variants = preprocess_variants(bgr)
     attempts = []
-    # Test two common page segmentation modes on each preprocessing variant.
-    for variant_name, img in variants:
+    for variant_name, image in preprocess_variants(bgr):
         for psm in (6, 11):
-            text, confidence, words = run_ocr(img, psm)
-            attempts.append({
-                "variant": variant_name, "psm": psm, "text": text,
-                "confidence": confidence, "words": words
-            })
-    # Confidence is a ranking aid only, not a correctness score.
+            text, conf, words = run_ocr(image, psm)
+            attempts.append({"variant": variant_name, "psm": psm, "text": text,
+                             "confidence": conf, "words": words})
     best = max(attempts, key=lambda x: (x["confidence"], len(x["text"].strip())))
     warnings = []
     if best["confidence"] < 75:
-        warnings.append("Độ tin cậy OCR trung bình thấp (<75)")
+        warnings.append("Confidence OCR thấp; cần đối chiếu ảnh gốc.")
     if not best["text"].strip():
-        warnings.append("Không nhận diện được văn bản")
+        warnings.append("Không nhận diện được văn bản.")
     if item.get("duplicate_of"):
-        warnings.append("Ảnh trùng nội dung byte với: " + item["duplicate_of"])
-    if re.search(r"\b\d{1,3}(?:[.,]\d{3})+\b", best["text"]):
-        warnings.append("Có số dạng hàng nghìn: kiểm tra dấu chấm/phẩy và từng chữ số")
+        warnings.append("Ảnh trùng byte với: " + item["duplicate_of"])
     if re.search(r"[Il|][0-9]|[0-9][OQ]", best["text"]):
-        warnings.append("Có cụm ký tự dễ nhầm giữa chữ và số (I/l/1, O/0)")
-    if len([x for x in best["text"].splitlines() if x.strip()]) <= 1:
-        warnings.append("Chỉ nhận diện được tối đa một dòng; kiểm tra vùng cắt và chất lượng ảnh")
+        warnings.append("Có ký tự dễ nhầm I/l/1 hoặc O/0.")
     return {
         "name": item["name"], "source": item["source"], "sha256": item["sha256"],
         "text": best["text"], "confidence": round(best["confidence"], 1),
-        "variant": best["variant"], "psm": best["psm"],
-        "warnings": warnings, "words": best["words"], "attempts": attempts,
-        "reviewed": False, "review_note": ""
+        "variant": best["variant"], "psm": best["psm"], "warnings": warnings,
+        "words": best["words"], "attempts": attempts, "reviewed": False, "review_note": ""
     }
 
-def style_sheet(ws, freeze="A2", filter_on=True):
-    ws.freeze_panes = freeze
-    if filter_on and ws.max_row >= 1:
-        ws.auto_filter.ref = ws.dimensions
-    for cell in ws[1]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor="075DA8")
-        cell.alignment = Alignment(vertical="center", wrap_text=True)
-    ws.row_dimensions[1].height = 30
+# ---------- Business rules / structured input ----------
+GROUP_COLUMNS = ["NHÓM HÀNG", "THỰC HIỆN", "TARGET", "% HT DỰ KIẾN"]
+STAFF_COLUMNS = [
+    "MÃ NHÂN VIÊN", "NHÂN VIÊN", "HẠNG", "HOÀN THÀNH THÁNG",
+    "DOANH THU QĐ", "% TARGET", "LƯỢT BILL", "% QUY ĐỔI",
+    "% TRẢ CHẬM", "% BÁN KÈM", "ĐIỂM THƯỞNG ERP",
+    "ĐIỂM THƯỞNG / GIỜ CÔNG", "DTQĐ / GIỜ CÔNG"
+]
+REVENUE_COLUMNS = ["NHÂN VIÊN", "DOANH THU QĐ", "LƯỢT BILL", "% TRẢ CHẬM", "ĐIỂM THƯỞNG ERP"]
 
-def build_suggestions(results: list[dict]) -> list[dict]:
-    """Deterministic review suggestions; deliberately does not rewrite source figures."""
-    suggestions = []
-    for r in results:
-        name = r.get("name", "")
-        text = r.get("text", "")
-        warnings = r.get("warnings", [])
-        conf = float(r.get("confidence", 0))
-        if conf < 75:
-            suggestions.append({
-                "MỨC ƯU TIÊN": "CAO", "ẢNH / NGUỒN": name,
-                "PHÁT HIỆN": f"Confidence OCR thấp ({conf:.1f}%).",
-                "ĐỀ XUẤT": "Mở ảnh gốc, phóng to vùng bảng và chọn lại phương án OCR khác. Không dùng số liệu từ ảnh này khi chưa kiểm tra.",
-                "TỰ ĐỘNG ĐIỀU CHỈNH": "KHÔNG – cần người rà soát"
-            })
-        if r.get("duplicate_of"):
-            suggestions.append({
-                "MỨC ƯU TIÊN": "TRUNG BÌNH", "ẢNH / NGUỒN": name,
-                "PHÁT HIỆN": "Nội dung file trùng byte với một ảnh khác.",
-                "ĐỀ XUẤT": f"Kiểm tra ảnh này có phải bản chụp lặp không. So sánh với {r['duplicate_of']} trước khi cộng dữ liệu.",
-                "TỰ ĐỘNG ĐIỀU CHỈNH": "KHÔNG – không tự xóa ảnh"
-            })
-        if re.search(r"\b\d{1,3}(?:[.,]\d{3})+\b", text):
-            suggestions.append({
-                "MỨC ƯU TIÊN": "CAO", "ẢNH / NGUỒN": name,
-                "PHÁT HIỆN": "Có chuỗi số có dấu chấm/phẩy phân tách hàng nghìn.",
-                "ĐỀ XUẤT": "Đối chiếu từng chữ số với ảnh gốc; xác định rõ dấu phân cách hàng nghìn/thập phân theo định dạng báo cáo.",
-                "TỰ ĐỘNG ĐIỀU CHỈNH": "KHÔNG – không tự chuyển kiểu số"
-            })
-        if re.search(r"[Il|][0-9]|[0-9][OQ]", text):
-            suggestions.append({
-                "MỨC ƯU TIÊN": "CAO", "ẢNH / NGUỒN": name,
-                "PHÁT HIỆN": "Có ký tự dễ nhầm giữa chữ và số (I/l/1 hoặc O/0).",
-                "ĐỀ XUẤT": "Kiểm tra mã hàng, mã nhân viên và các ô số có ký tự tương tự. Giữ nguyên dạng văn bản nếu là mã định danh.",
-                "TỰ ĐỘNG ĐIỀU CHỈNH": "KHÔNG – cần xác minh"
-            })
-        if len([x for x in text.splitlines() if x.strip()]) <= 1:
-            suggestions.append({
-                "MỨC ƯU TIÊN": "CAO", "ẢNH / NGUỒN": name,
-                "PHÁT HIỆN": "OCR chỉ nhận diện tối đa một dòng.",
-                "ĐỀ XUẤT": "Kiểm tra ảnh có bị cắt, xoay, mờ hoặc bảng quá nhỏ. Chụp lại thẳng góc, đủ sáng và bao trọn bảng.",
-                "TỰ ĐỘNG ĐIỀU CHỈNH": "KHÔNG – cần kiểm tra ảnh"
-            })
-        if not warnings and conf >= 75:
-            suggestions.append({
-                "MỨC ƯU TIÊN": "THẤP", "ẢNH / NGUỒN": name,
-                "PHÁT HIỆN": "Không phát hiện cảnh báo OCR cơ bản.",
-                "ĐỀ XUẤT": "Vẫn đối chiếu tổng dòng/cột và các con số quan trọng với ảnh gốc. Không xem đây là xác nhận dữ liệu đúng.",
-                "TỰ ĐỘNG ĐIỀU CHỈNH": "KHÔNG – chỉ gợi ý"
-            })
-    if not suggestions:
-        suggestions.append({
-            "MỨC ƯU TIÊN": "THÔNG TIN", "ẢNH / NGUỒN": "Toàn bộ lô",
-            "PHÁT HIỆN": "Chưa có kết quả OCR để phân tích.",
-            "ĐỀ XUẤT": "Nạp ảnh và chạy OCR trước.",
-            "TỰ ĐỘNG ĐIỀU CHỈNH": "CHƯA THỰC HIỆN"
-        })
-    return suggestions
+def parse_tsv(text: str, label: str) -> pd.DataFrame:
+    if not text.strip():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(io.StringIO(text), sep="\t", dtype=str, keep_default_na=False)
+    except Exception as exc:
+        raise ValueError(f"{label}: không đọc được bảng TSV: {exc}")
+    df.columns = [str(c).strip().upper() for c in df.columns]
+    return df
 
-def make_workbook(results: list[dict], reviewed_df: pd.DataFrame, suggestions: list[dict], user_feedback: str) -> bytes:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "TONG_HOP"
-    headers = ["STT", "TÊN ẢNH", "NGUỒN", "SHA256", "OCR CONFIDENCE (%)", "PHƯƠNG ÁN OCR", "PSM", "SỐ TỪ", "CẢNH BÁO", "ĐÃ RÀ SOÁT"]
-    ws.append(headers)
-    for i, r in enumerate(results, 1):
-        ws.append([i, r["name"], r["source"], r["sha256"], r["confidence"], r["variant"], r["psm"],
-                   len(r["words"]), " | ".join(r["warnings"]) or "Không có cảnh báo cơ bản", "CÓ" if r["reviewed"] else "CHƯA"])
-    style_sheet(ws)
-    widths = [8, 32, 22, 66, 18, 22, 8, 10, 65, 15]
-    for i, width in enumerate(widths, 1):
-        ws.column_dimensions[get_column_letter(i)].width = width
+def parse_staff_ids(text: str) -> list[str]:
+    ids = [x.strip() for x in re.split(r"[,;\s]+", text.strip()) if x.strip()]
+    if len(ids) != 9:
+        raise ValueError(f"Phải có đúng 9 mã nhân viên có ảnh KPI. Hiện có {len(ids)} mã.")
+    if len(set(ids)) != 9:
+        raise ValueError("Danh sách mã nhân viên bị trùng. Mỗi người chỉ được xuất hiện một lần.")
+    return ids
 
-    review = wb.create_sheet("RA_SOAT")
-    review.append(["STT", "TÊN ẢNH", "VĂN BẢN OCR ĐÃ CHỈNH SỬA", "ĐÃ ĐỐI CHIẾU ẢNH GỐC", "GHI CHÚ NGƯỜI RÀ SOÁT"])
-    for i, row in reviewed_df.iterrows():
-        review.append([int(i) + 1, str(row.get("TÊN ẢNH", "")), str(row.get("VĂN BẢN OCR", "")),
-                       "CÓ" if bool(row.get("ĐÃ XÁC NHẬN", False)) else "CHƯA", str(row.get("GHI CHÚ", ""))])
-    style_sheet(review)
-    review.column_dimensions["A"].width = 8
-    review.column_dimensions["B"].width = 32
-    review.column_dimensions["C"].width = 100
-    review.column_dimensions["D"].width = 24
-    review.column_dimensions["E"].width = 45
-    for row in review.iter_rows(min_row=2, min_col=3, max_col=3):
-        row[0].alignment = Alignment(wrap_text=True, vertical="top")
+def normalize_date(report_dump_date: date) -> date:
+    # Business rule confirmed by user: data date is dump date minus one calendar day.
+    return report_dump_date - timedelta(days=1)
 
-    words = wb.create_sheet("OCR_TUNG_TU")
-    words.append(["ẢNH", "TỪ/KÝ TỰ OCR", "CONFIDENCE (%)", "LEFT", "TOP", "WIDTH", "HEIGHT", "BLOCK", "PARAGRAPH", "LINE", "WORD"])
-    for r in results:
-        for w in r["words"]:
-            words.append([r["name"], w["text"], w["confidence"], w["left"], w["top"], w["width"], w["height"],
-                          w["block"], w["paragraph"], w["line"], w["word"]])
-    style_sheet(words)
-    for col, width in zip("ABCDEFGHIJK", [32, 24, 16, 12, 12, 12, 12, 10, 12, 10, 10]):
-        words.column_dimensions[col].width = width
+def as_numeric(series: pd.Series) -> pd.Series:
+    # Conservative parser: preserve blank as NaN; don't turn missing into zero.
+    return pd.to_numeric(series.astype(str).str.replace(",", "", regex=False).str.strip(), errors="coerce")
 
-    qa = wb.create_sheet("CANH_BAO")
-    qa.append(["MỨC", "ẢNH", "NỘI DUNG CẢNH BÁO", "HÀNH ĐỘNG"])
-    for r in results:
-        if not r["warnings"]:
-            qa.append(["THAM KHẢO", r["name"], "Không phát hiện cảnh báo cơ bản; không đồng nghĩa dữ liệu đúng", "Vẫn đối chiếu ảnh gốc"])
+def filter_matrix_to_nine(matrix: pd.DataFrame, nine_ids: list[str]) -> tuple[pd.DataFrame, list[str]]:
+    if matrix.empty:
+        return matrix, ["Chưa có dữ liệu ma trận THI_DUA."]
+    first_col = matrix.columns[0]
+    if first_col not in ("MÃ NHÂN VIÊN", "NHÂN VIÊN", "TÊN NHÂN VIÊN"):
+        # Expected first column contains a name and employee code, e.g. "Nguyễn Ngọc Tân - 137502".
+        first_col = matrix.columns[0]
+    keep_rows, warnings = [], []
+    for _, row in matrix.iterrows():
+        label = str(row.iloc[0]).strip()
+        if label.upper() in ("TỔNG", "TONG", "TOTAL", ""):
+            continue
+        found = re.findall(r"(?<!\d)\d{4,8}(?!\d)", label)
+        emp_id = found[-1] if found else ""
+        if emp_id in nine_ids:
+            keep_rows.append(row)
+        elif emp_id:
+            warnings.append(f"Đã loại khỏi THI_DUA nhân viên không thuộc 9 ảnh KPI: {label}")
         else:
-            for warning in r["warnings"]:
-                qa.append(["CẦN KIỂM TRA", r["name"], warning, "Mở ảnh gốc và kiểm tra thủ công"])
-    style_sheet(qa)
-    for col, width in zip("ABCD", [18, 32, 70, 45]):
-        qa.column_dimensions[col].width = width
+            warnings.append(f"Không nhận diện được mã nhân viên ở dòng ma trận: {label}")
+    filtered = pd.DataFrame(keep_rows, columns=matrix.columns)
+    found_ids = set()
+    for value in filtered.iloc[:, 0].astype(str) if not filtered.empty else []:
+        ids = re.findall(r"(?<!\d)\d{4,8}(?!\d)", value)
+        if ids:
+            found_ids.add(ids[-1])
+    missing = sorted(set(nine_ids) - found_ids)
+    if missing:
+        warnings.append("Thiếu dòng ma trận cho 9 nhân viên: " + ", ".join(missing))
+    duplicated = filtered.iloc[:, 0].astype(str).str.extract(r"(\d{4,8})", expand=False).dropna()
+    if duplicated.duplicated().any():
+        warnings.append("Có mã nhân viên xuất hiện nhiều lần trong ma trận đã lọc.")
+    return filtered, warnings
 
-    ai = wb.create_sheet("AI_GOP_Y")
-    ai.append(["MỨC ƯU TIÊN", "ẢNH / NGUỒN", "PHÁT HIỆN", "ĐỀ XUẤT ĐIỀU CHỈNH", "TỰ ĐỘNG ĐIỀU CHỈNH"])
-    for item in suggestions:
-        ai.append([item.get("MỨC ƯU TIÊN", ""), item.get("ẢNH / NGUỒN", ""), item.get("PHÁT HIỆN", ""),
-                   item.get("ĐỀ XUẤT", ""), item.get("TỰ ĐỘNG ĐIỀU CHỈNH", "")])
-    ai.append([])
-    ai.append(["GÓP Ý / YÊU CẦU ĐIỀU CHỈNH DO NGƯỜI DÙNG NHẬP", user_feedback or "KHÔNG CÓ DATA"])
-    style_sheet(ai, filter_on=False)
-    for col, width in zip("ABCDE", [18, 32, 55, 95, 32]):
-        ai.column_dimensions[col].width = width
-    for row in ai.iter_rows(min_row=2):
-        for cell in row:
-            cell.alignment = Alignment(wrap_text=True, vertical="top")
+def make_sheet(wb: Workbook, title: str, df: pd.DataFrame, plain: bool = False):
+    ws = wb.create_sheet(title)
+    if df.empty:
+        ws.append(["KHÔNG CÓ DATA"])
+        return ws
+    ws.append(list(df.columns))
+    for row in df.itertuples(index=False, name=None):
+        ws.append([None if pd.isna(v) else v for v in row])
+    ws.freeze_panes = "B2"
+    ws.auto_filter.ref = ws.dimensions
+    if plain:
+        thin = Side(style="thin", color="808080")
+        for row in ws.iter_rows():
+            for cell in row:
+                cell.fill = __import__("openpyxl").styles.PatternFill(fill_type=None)
+                cell.font = Font(name="Arial", size=9, bold=(cell.row == 1))
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
+                cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        ws.sheet_view.showGridLines = True
+    else:
+        for cell in ws[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = __import__("openpyxl").styles.PatternFill("solid", fgColor="075DA8")
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+    for col_idx, col in enumerate(df.columns, 1):
+        vals = [len(str(col))] + [len(str(v)) for v in df[col].head(100) if pd.notna(v)]
+        ws.column_dimensions[get_column_letter(col_idx)].width = min(max(max(vals, default=12) + 2, 12), 38)
+    return ws
 
-    guide = wb.create_sheet("DOC_TRUOC_KHI_DUNG")
-    guide.append(["MỤC", "NỘI DUNG"])
-    notes = [
-        ("Phạm vi", "OCR miễn phí bằng Tesseract 5 với ngôn ngữ vie+eng; không phải AI hiểu nghiệp vụ."),
-        ("Độ tin cậy", "Confidence chỉ dùng để xếp hạng phương án OCR; không chứng minh số liệu chính xác."),
-        ("Nguồn gốc", "SHA256 giúp nhận diện file trùng byte; không xác thực nguồn/chủ sở hữu."),
-        ("Số liệu", "Mọi số tiền, %, ngày, mã hàng và số 0 đầu phải đối chiếu ảnh gốc."),
-        ("Cột bảng", "Không tự suy diễn cấu trúc cột. Sheet OCR_TUNG_TU lưu tọa độ để hỗ trợ truy vết."),
-        ("Đầu ra", "RA_SOAT chứa văn bản đã chỉnh sửa và trạng thái xác nhận do người dùng nhập."),
-        ("Bảo mật", "File được xử lý trên máy chủ Streamlit Cloud; không tải dữ liệu nội bộ nếu chưa được cho phép."),
-    ]
-    for x in notes:
-        guide.append(list(x))
-    style_sheet(guide, filter_on=False)
-    guide.column_dimensions["A"].width = 22
-    guide.column_dimensions["B"].width = 115
-    for row in guide.iter_rows(min_row=2):
-        row[1].alignment = Alignment(wrap_text=True, vertical="top")
+def build_workbook(group_df: pd.DataFrame, staff_df: pd.DataFrame, matrix_df: pd.DataFrame,
+                   revenue_df: pd.DataFrame, warnings: list[str], raw_rows: list[dict],
+                   data_date: date) -> bytes:
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    # Exact six requested sheets, in the requested order.
+    make_sheet(wb, "TONG_HOP_TAP_THE", group_df)
+    make_sheet(wb, "NHAN_VIEN", staff_df)
+    make_sheet(wb, "THI_DUA", matrix_df, plain=True)
+    make_sheet(wb, "DOANH THU", revenue_df)
+    warn_df = pd.DataFrame([{"MỨC": "CẦN KIỂM TRA", "CẢNH BÁO": w} for w in warnings])
+    make_sheet(wb, "CANH_BAO", warn_df)
+    raw_df = pd.DataFrame(raw_rows, columns=["TÊN ẢNH", "NGUỒN", "SHA256", "NGÀY DỮ LIỆU", "OCR CONFIDENCE", "VĂN BẢN OCR", "ĐÃ XÁC NHẬN"])
+    make_sheet(wb, "DATA_GOC", raw_df)
+
+    # Data date is date-only. Keep metadata at the top of the first sheet.
+    ws = wb["TONG_HOP_TAP_THE"]
+    ws.insert_rows(1, 2)
+    ws["A1"] = "NGÀY DỮ LIỆU"
+    ws["B1"] = data_date.strftime("%d/%m/%Y")
+    ws["A1"].font = Font(bold=True)
+    ws["B1"].font = Font(bold=True)
+    return save_wb(wb)
+
+def save_wb(wb: Workbook) -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
-def main() -> None:
+# ---------- UI ----------
+def main():
     require_password()
     st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap');
     html, body, [class*="css"] {font-family:'Be Vietnam Pro',Arial,sans-serif;}
     .stApp {background:linear-gradient(180deg,#f4f7fb 0%,#eef3f8 100%);}
-    [data-testid="stHeader"] {background:rgba(255,255,255,0.85);}
     [data-testid="stSidebar"] {background:#102d4d;}
     [data-testid="stSidebar"] * {color:#f4f8fc !important;}
-    h1,h2,h3 {font-weight:800 !important; letter-spacing:-.35px; color:#102d4d;}
-    p, label, .stMarkdown {color:#20364d;}
-    [data-testid="stMetric"] {background:#fff;border:1px solid #dce5ef;padding:16px 18px;border-radius:14px;box-shadow:0 5px 18px rgba(20,50,80,.06);}
-    [data-testid="stMetricLabel"] p {font-weight:700;color:#53677d;}
-    [data-testid="stMetricValue"] {font-weight:800;color:#075da8;}
-    div.stButton > button, div.stDownloadButton > button {border-radius:10px;font-weight:800;border:0;padding:.62rem 1rem;box-shadow:0 3px 10px rgba(0,75,135,.12);}
-    div.stButton > button[kind="primary"], div.stDownloadButton > button[kind="primary"] {background:#0874c9;color:#fff;}
-    div.stButton > button:hover, div.stDownloadButton > button:hover {border:0;filter:brightness(1.06);}
-    [data-testid="stFileUploader"] {background:#fff;border:1.5px dashed #9cb4cb;border-radius:13px;padding:12px;}
-    [data-testid="stExpander"] {background:#fff;border:1px solid #dce5ef;border-radius:12px;}
-    [data-testid="stTabs"] button {font-weight:800;}
-    [data-testid="stAlert"] {border-radius:12px;}
-    .hero {background:linear-gradient(115deg,#082d50,#075da8 70%,#0b83c6);padding:24px 26px;border-radius:18px;color:white;margin:4px 0 18px;box-shadow:0 12px 28px rgba(5,57,100,.18);}
-    .hero h1 {color:white !important;margin:0;font-size:29px;letter-spacing:-.6px;}
-    .hero p {color:#e5f3ff;margin:7px 0 0;font-size:14px;font-weight:500;}
-    .eyebrow {color:#ffdf00;font-weight:800;font-size:11px;letter-spacing:1.8px;text-transform:uppercase;margin-bottom:8px;}
-    .section-kicker {font-size:12px;font-weight:800;color:#0874c9;letter-spacing:1px;text-transform:uppercase;}
-    .small-note {color:#63758b;font-size:12px;}
+    h1,h2,h3 {font-weight:800 !important;color:#102d4d;}
+    [data-testid="stMetric"] {background:#fff;border:1px solid #dce5ef;padding:14px;border-radius:13px;}
+    div.stButton > button, div.stDownloadButton > button {border-radius:10px;font-weight:800;}
     </style>
-    <div class="hero">
-      <div class="eyebrow">ĐIỆN MÁY XANH · SMART DATA WORKFLOW</div>
-      <h1>ĐMX SMART REPORT AI</h1>
-      <p>Đọc báo cáo có kiểm soát · Rà soát minh bạch · Xuất Excel có truy vết</p>
-    </div>
     """, unsafe_allow_html=True)
-    st.caption("FREE V1 · OCR tiếng Việt/Anh · Giao diện tối ưu dễ đọc · Rà soát thủ công · Xuất Excel nhiều Sheet")
+    st.title("ĐMX SMART REPORT AI")
+    st.caption("V1.1 · Kiểm soát ngày dữ liệu · Lọc đúng 9 nhân viên có ảnh KPI · Xuất 6 Sheet")
+    st.warning("Ưu tiên độ chính xác: OCR chỉ là bản nháp. Chỉ dùng dữ liệu đã được người dùng đối chiếu ảnh gốc.")
+
     with st.sidebar:
-        st.markdown("## ĐMX SMART REPORT")
-        st.markdown("**Bảng điều khiển**")
-        st.markdown("---")
-        st.markdown("**Quy trình xử lý**")
-        st.markdown("1. Nạp ảnh báo cáo")
-        st.markdown("2. Chạy OCR nhiều phương án")
-        st.markdown("3. Đối chiếu ảnh gốc")
-        st.markdown("4. Nhận góp ý điều chỉnh")
-        st.markdown("5. Xuất Excel")
-        st.markdown("---")
-        st.caption("FREE MODE · Không gọi API AI trả phí")
-        if st.button("Đăng xuất", use_container_width=True):
+        st.subheader("Quy trình")
+        st.markdown("1. Nạp ảnh gốc\n2. Chạy OCR\n3. Khai báo 9 mã NV\n4. Nhập bảng đã xác minh\n5. Xuất Excel")
+        if st.button("Đăng xuất"):
             st.session_state["authenticated"] = False
             st.rerun()
-    st.warning("Ưu tiên chính xác: hệ thống không tự kết luận số liệu đúng. OCR confidence không phải tỷ lệ chính xác. Mọi số liệu quan trọng phải đối chiếu ảnh gốc.")
-    with st.expander("Nguồn dữ liệu và giới hạn", expanded=False):
-        st.markdown("""
-        - **Ảnh trực tiếp:** JPG/JPEG/PNG/WEBP/BMP/TIF, tối đa 30 ảnh/lượt, 8 MB/ảnh.
-        - **ZIP:** tối đa 25 MB, ảnh nằm trong thư mục con cũng được tìm.
-        - **Google Drive:** V1 chỉ hỗ trợ link **file ảnh công khai/chia sẻ được tải bằng link**. Không hỗ trợ thư mục Drive và file private/OAuth.
-        - **Không dùng Gemini/API trả phí.** OCR chạy bằng Tesseract trên máy chủ Streamlit.
-        - File xử lý nằm trong bộ nhớ/không gian tạm của ứng dụng; không có kho lưu trữ bền vững hoặc tài khoản nhân viên trong V1.
-        """)
-    tab_upload, tab_drive, tab_result = st.tabs(["① Tải ảnh / ZIP", "② Google Drive", "③ Kết quả & Excel"])
-    with tab_upload:
-        images = st.file_uploader("Chọn ảnh báo cáo (có thể chọn nhiều)", type=["jpg","jpeg","png","webp","bmp","tif","tiff"], accept_multiple_files=True)
-        zip_file = st.file_uploader("Hoặc chọn một file ZIP chứa ảnh", type=["zip"], accept_multiple_files=False)
-        if st.button("Nạp dữ liệu đã chọn", type="primary"):
+
+    tab1, tab2, tab3 = st.tabs(["① NẠP ẢNH & OCR", "② NHẬP DỮ LIỆU ĐÃ XÁC MINH", "③ KIỂM TRA & XUẤT EXCEL"])
+
+    with tab1:
+        dump_date = st.date_input("Ngày đổ số", value=date.today(), help="Ngày dữ liệu tự động = ngày đổ số - 1 ngày; không dùng giờ.")
+        st.session_state["dump_date"] = dump_date
+        st.info(f"Ngày dữ liệu sẽ là: **{normalize_date(dump_date).strftime('%d/%m/%Y')}**")
+        uploads = st.file_uploader("Tải ảnh báo cáo (có thể chọn nhiều)", type=["jpg","jpeg","png","webp","bmp","tif","tiff"], accept_multiple_files=True)
+        zip_upload = st.file_uploader("Hoặc tải ZIP chứa ảnh", type=["zip"])
+        if st.button("Nạp ảnh", type="primary"):
             try:
-                items = load_image_items(images or [], zip_file)
+                items = load_image_items(uploads or [], zip_upload)
                 st.session_state["items"] = items
                 st.session_state.pop("results", None)
                 st.success(f"Đã nạp {len(items)} ảnh.")
-                st.dataframe(pd.DataFrame([{"Tên ảnh":x["name"],"Nguồn":x["source"],"Dung lượng (KB)":round(len(x["bytes"])/1024,1),"Trùng ảnh":x["duplicate_of"] or ""} for x in items]), use_container_width=True)
-            except Exception as e:
-                st.error(str(e))
-    with tab_drive:
-        st.info("Chỉ dùng link file ảnh Drive có quyền tải bằng link. Không dán link chứa dữ liệu nhạy cảm nếu chưa được phép đưa lên máy chủ.")
-        drive_url = st.text_input("Link Google Drive công khai")
-        if st.button("Tải ảnh từ Drive"):
-            try:
-                item = fetch_public_drive_file(drive_url)
-                st.session_state["items"] = [item]
-                st.session_state.pop("results", None)
-                st.success("Đã tải ảnh: " + item["name"])
-            except Exception as e:
-                st.error(str(e))
-    with tab_result:
+                st.dataframe(pd.DataFrame([{"TÊN ẢNH": x["name"], "NGUỒN": x["source"],
+                    "DUNG LƯỢNG KB": round(len(x["bytes"])/1024, 1), "TRÙNG": x["duplicate_of"]} for x in items]),
+                    use_container_width=True, hide_index=True)
+            except Exception as exc:
+                st.error(str(exc))
         items = st.session_state.get("items", [])
-        if not items:
-            st.info("Hãy nạp ảnh ở tab đầu vào trước.")
-        else:
-            st.write(f"**Số ảnh đã nạp: {len(items)} / {MAX_FILES}**")
-            if st.button("▶ Chạy OCR và kiểm tra", type="primary"):
+        if items and st.button("Chạy OCR 6 phương án", type="secondary"):
+            out, progress = [], st.progress(0)
+            for i, item in enumerate(items):
                 try:
-                    with st.spinner("Đang xử lý ảnh. Tốc độ phụ thuộc tài nguyên máy chủ và kích thước ảnh..."):
-                        results = []
-                        progress = st.progress(0)
-                        for idx, item in enumerate(items):
-                            try:
-                                results.append(process_one(item))
-                            except Exception as e:
-                                results.append({
-                                    "name": item["name"], "source": item["source"], "sha256": item["sha256"],
-                                    "text": "", "confidence": 0.0, "variant": "LỖI", "psm": 0,
-                                    "warnings": ["Lỗi xử lý: " + str(e)], "words": [], "attempts": [],
-                                    "reviewed": False, "review_note": ""
-                                })
-                            progress.progress((idx+1)/len(items))
-                    st.session_state["results"] = results
-                    st.success("OCR hoàn tất. Chuyển xuống dưới để rà soát.")
-                except Exception as e:
-                    st.error("Không thể hoàn tất OCR: " + str(e))
-            results = st.session_state.get("results", [])
-            if results:
-                st.subheader("Kết quả nhận dạng")
-                st.caption("Có thể chọn ảnh và so sánh các phương án OCR. Phương án có confidence cao nhất được chọn mặc định; hãy kiểm tra với ảnh gốc.")
-                for idx, r in enumerate(results):
-                    with st.expander(f"{idx+1}. {r['name']} · confidence {r['confidence']:.1f}% · {len(r['warnings'])} cảnh báo", expanded=(idx == 0)):
-                        current_items = st.session_state.get("items", [])
-                        if idx < len(current_items):
-                            st.image(current_items[idx]["bytes"], caption="Ảnh gốc để đối chiếu", use_container_width=True)
-                        if r["warnings"]:
-                            for warning in r["warnings"]:
-                                st.warning(warning)
-                        else:
-                            st.info("Không phát hiện cảnh báo cơ bản. Vẫn cần đối chiếu ảnh gốc.")
-                        if r["attempts"]:
-                            choices = [f"{a['variant']} | PSM {a['psm']} | {a['confidence']:.1f}%" for a in r["attempts"]]
-                            selected = st.selectbox("Chọn phương án OCR", range(len(choices)), format_func=lambda x: choices[x], index=next((j for j,a in enumerate(r["attempts"]) if a["variant"]==r["variant"] and a["psm"]==r["psm"]),0), key=f"choice_{idx}")
-                            selected_attempt = r["attempts"][selected]
-                            default_text = selected_attempt["text"]
-                        else:
-                            default_text = r["text"]
-                        edited = st.text_area("Văn bản OCR (hãy sửa theo ảnh gốc)", value=default_text, height=220, key=f"text_{idx}")
-                        confirmed = st.checkbox("Tôi đã mở ảnh gốc, đối chiếu và xác nhận nội dung", value=bool(r.get("reviewed")), key=f"confirm_{idx}")
-                        note = st.text_input("Ghi chú rà soát (nếu có)", value=r.get("review_note",""), key=f"note_{idx}")
-                        r["text"] = edited
-                        r["reviewed"] = confirmed
-                        r["review_note"] = note
-                        if r["attempts"]:
-                            r["variant"] = selected_attempt["variant"]
-                            r["psm"] = selected_attempt["psm"]
-                            r["confidence"] = round(selected_attempt["confidence"],1)
-                            r["words"] = selected_attempt["words"]
-                # Recompute review status from widget state.
-                all_reviewed = all(r.get("reviewed") and r.get("text","").strip() for r in results)
-                st.divider()
-                st.write(f"**Đã xác nhận:** {sum(1 for r in results if r.get('reviewed'))}/{len(results)} ảnh")
-                if not all_reviewed:
-                    st.error("Chưa đủ điều kiện xuất theo quy trình an toàn: còn ảnh chưa xác nhận hoặc nội dung rỗng.")
-                # Reconstruct the exact editable review rows from the current state.
-                review_df = pd.DataFrame([{
-                    "TÊN ẢNH": r["name"], "VĂN BẢN OCR": r["text"],
-                    "ĐÃ XÁC NHẬN": bool(r.get("reviewed")), "GHI CHÚ": r.get("review_note","")
-                } for r in results])
+                    out.append(process_one(item))
+                except Exception as exc:
+                    out.append({"name": item["name"], "source": item["source"], "sha256": item["sha256"],
+                        "text": "", "confidence": 0, "variant": "LỖI", "psm": 0,
+                        "warnings": [str(exc)], "words": [], "attempts": [], "reviewed": False, "review_note": ""})
+                progress.progress((i+1)/len(items))
+            st.session_state["results"] = out
+            st.success("OCR hoàn tất. Hãy đối chiếu ảnh gốc trước khi xác nhận.")
+        results = st.session_state.get("results", [])
+        for i, result in enumerate(results):
+            with st.expander(f"{i+1}. {result['name']} · OCR {result['confidence']}%", expanded=(i == 0)):
+                st.image(items[i]["bytes"], use_container_width=True)
+                st.text_area("Văn bản OCR – có thể chỉnh sửa", result["text"], height=180, key=f"ocr_text_{i}")
+                result["text"] = st.session_state.get(f"ocr_text_{i}", result["text"])
+                result["reviewed"] = st.checkbox("Đã đối chiếu với ảnh gốc", key=f"review_{i}")
+                result["review_note"] = st.text_input("Ghi chú", key=f"review_note_{i}")
+                for warning in result["warnings"]:
+                    st.warning(warning)
 
-                st.markdown("## 🤖 Trợ lý rà soát & góp ý điều chỉnh")
-                st.caption("Chế độ FREE: phân tích theo quy tắc kiểm tra minh bạch, không phải mô hình AI tạo sinh. Trợ lý chỉ đề xuất; không tự sửa số liệu hoặc ghi đè nội dung gốc.")
-                suggestions = build_suggestions(results)
-                high_count = sum(1 for x in suggestions if x["MỨC ƯU TIÊN"] == "CAO")
-                medium_count = sum(1 for x in suggestions if x["MỨC ƯU TIÊN"] == "TRUNG BÌNH")
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Gợi ý cần xử lý", len(suggestions))
-                m2.metric("Ưu tiên cao", high_count)
-                m3.metric("Trùng ảnh cần xem", medium_count)
-                st.dataframe(pd.DataFrame(suggestions), use_container_width=True, hide_index=True)
-                user_feedback = st.text_area(
-                    "Góp ý bổ sung / yêu cầu điều chỉnh file Excel",
-                    placeholder="Ví dụ: Đề nghị gộp các ảnh cùng loại vào một Sheet; giữ mã nhân viên dạng văn bản; bổ sung đối chiếu tổng Target và Lũy kế...",
-                    height=110,
-                    key="user_ai_feedback"
-                )
-                st.info("Trợ lý không tự thay đổi dữ liệu. Các đề xuất và góp ý của người dùng sẽ được lưu vào Sheet AI_GOP_Y để người kiểm tra quyết định.")
-                st.download_button(
-                    "⬇ Tải Excel nhiều Sheet",
-                    data=make_workbook(results, review_df, suggestions, user_feedback),
-                    file_name="DMX_SMART_REPORT_OCR_REVIEW.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    disabled=not all_reviewed,
-                    type="primary"
-                )
-                st.caption("Excel gồm TONG_HOP, RA_SOAT, OCR_TUNG_TU, CANH_BAO, AI_GOP_Y và DOC_TRUOC_KHI_DUNG.")
+    with tab2:
+        st.markdown("### Danh sách 9 nhân viên có ảnh KPI")
+        st.caption("Nhập đúng 9 mã nhân viên lấy từ 9 ảnh cá nhân. Không đưa 2 nhân viên không có ảnh vào kết quả.")
+        staff_ids_text = st.text_input("9 mã nhân viên, phân cách bằng dấu phẩy",
+            value=st.session_state.get("staff_ids_text", "137502, 181846"),
+            help="Hiện mới có 2 mã đọc được từ ảnh mẫu. Cần bổ sung 7 mã còn lại trước khi xuất.")
+        st.session_state["staff_ids_text"] = staff_ids_text
+        try:
+            staff_ids = parse_staff_ids(staff_ids_text)
+            st.success("Đã đủ 9 mã nhân viên, không trùng.")
+        except ValueError as exc:
+            staff_ids = []
+            st.warning(str(exc))
+
+        st.markdown("### Dán bảng dữ liệu đã đối chiếu")
+        st.caption("Dán bảng dạng TSV (các cột cách nhau bằng phím Tab), có hàng tiêu đề. Dữ liệu chỉ được xuất sau khi người dùng đã đối chiếu với ảnh.")
+        group_text = st.text_area("A. Tập thể – cột: NHÓM HÀNG, THỰC HIỆN, TARGET, % HT DỰ KIẾN",
+            height=130, key="group_tsv", placeholder="NHÓM HÀNG\\tTHỰC HIỆN\\tTARGET\\t% HT DỰ KIẾN\\nĐiện tử Samsung\\t20.00\\t108.00\\t64.7%")
+        staff_text = st.text_area("B. Nhân viên – mỗi dòng một nhân viên, có MÃ NHÂN VIÊN và NHÂN VIÊN",
+            height=150, key="staff_tsv", placeholder="MÃ NHÂN VIÊN\\tNHÂN VIÊN\\tHẠNG\\tHOÀN THÀNH THÁNG\\tDOANH THU QĐ\\t% TARGET\\tLƯỢT BILL\\t% QUY ĐỔI\\t% TRẢ CHẬM\\t% BÁN KÈM\\tĐIỂM THƯỞNG ERP")
+        matrix_text = st.text_area("C. Ma trận THI ĐUA – cột đầu là NHÂN VIÊN (tên - mã), các cột sau là Nhóm hàng",
+            height=180, key="matrix_tsv", placeholder="NHÂN VIÊN\\tĐIỆN TỬ SAMSUNG\\tCE LG\\tTIVI TCL\\nNguyễn Ngọc Tân - 137502\\t13.00\\t21.30\\t5.73")
+        revenue_text = st.text_area("D. DOANH THU – đúng 5 cột theo yêu cầu",
+            height=130, key="revenue_tsv", placeholder="NHÂN VIÊN\\tDOANH THU QĐ\\tLƯỢT BILL\\t% TRẢ CHẬM\\tĐIỂM THƯỞNG ERP")
+        st.info("V1.1 chưa tự chuyển ảnh thành bảng nghiệp vụ hoàn chỉnh. Đây là bước nhập dữ liệu đã xác minh để tránh tự suy đoán cấu trúc bảng. OCR thô vẫn được lưu trong DATA_GOC.")
+
+    with tab3:
+        st.markdown("### Kiểm tra điều kiện xuất")
+        dump_date = st.session_state.get("dump_date", date.today())
+        data_date = normalize_date(dump_date)
+        st.metric("NGÀY DỮ LIỆU", data_date.strftime("%d/%m/%Y"))
+        try:
+            staff_ids = parse_staff_ids(st.session_state.get("staff_ids_text", ""))
+        except ValueError as exc:
+            staff_ids = []
+            st.error(str(exc))
+
+        warnings = []
+        try:
+            group_df = parse_tsv(st.session_state.get("group_tsv", ""), "Tập thể")
+            staff_df = parse_tsv(st.session_state.get("staff_tsv", ""), "Nhân viên")
+            matrix_df = parse_tsv(st.session_state.get("matrix_tsv", ""), "Ma trận thi đua")
+            revenue_df = parse_tsv(st.session_state.get("revenue_tsv", ""), "Doanh thu")
+            if not staff_ids:
+                warnings.append("Chưa khai báo đủ đúng 9 mã nhân viên có ảnh KPI.")
+            if not staff_df.empty and "MÃ NHÂN VIÊN" in staff_df.columns:
+                staff_df["MÃ NHÂN VIÊN"] = staff_df["MÃ NHÂN VIÊN"].astype(str)
+                staff_df = staff_df[staff_df["MÃ NHÂN VIÊN"].isin(staff_ids)].copy()
+                missing_staff = sorted(set(staff_ids) - set(staff_df["MÃ NHÂN VIÊN"]))
+                if missing_staff:
+                    warnings.append("Thiếu dữ liệu NHAN_VIEN cho mã: " + ", ".join(missing_staff))
+                if staff_df["MÃ NHÂN VIÊN"].duplicated().any():
+                    warnings.append("Trùng mã nhân viên trong bảng NHAN_VIEN.")
+            elif not staff_df.empty:
+                warnings.append("Bảng NHAN_VIEN thiếu cột MÃ NHÂN VIÊN.")
+            if not matrix_df.empty and staff_ids:
+                matrix_df, matrix_warnings = filter_matrix_to_nine(matrix_df, staff_ids)
+                warnings.extend(matrix_warnings)
+            if not revenue_df.empty:
+                if list(revenue_df.columns) != REVENUE_COLUMNS:
+                    warnings.append("DOANH THU chưa đúng thứ tự 5 cột yêu cầu: " + " | ".join(REVENUE_COLUMNS))
+                if "NHÂN VIÊN" in revenue_df.columns and not staff_df.empty:
+                    allowed_names = set(staff_df["NHÂN VIÊN"].astype(str))
+                    revenue_df = revenue_df[revenue_df["NHÂN VIÊN"].astype(str).isin(allowed_names)].copy()
+            if group_df.empty:
+                warnings.append("Chưa có dữ liệu TONG_HOP_TAP_THE.")
+            if staff_df.empty:
+                warnings.append("Chưa có dữ liệu NHAN_VIEN đã xác minh.")
+            if matrix_df.empty:
+                warnings.append("Chưa có ma trận THI_DUA.")
+            if revenue_df.empty:
+                warnings.append("Chưa có dữ liệu DOANH THU.")
+        except Exception as exc:
+            warnings.append("Lỗi kiểm tra bảng: " + str(exc))
+            group_df = staff_df = matrix_df = revenue_df = pd.DataFrame()
+
+        for warning in warnings:
+            st.warning(warning)
+        ready = bool(staff_ids) and not any("Lỗi kiểm tra" in w for w in warnings)
+        st.caption("Có cảnh báo không đồng nghĩa file không thể tạo; cảnh báo sẽ được ghi vào CANH_BAO. Tuy nhiên, dữ liệu trống sẽ được ghi rõ KHÔNG CÓ DATA.")
+        results = st.session_state.get("results", [])
+        raw_rows = [{
+            "TÊN ẢNH": r["name"], "NGUỒN": r["source"], "SHA256": r["sha256"],
+            "NGÀY DỮ LIỆU": data_date.strftime("%d/%m/%Y"),
+            "OCR CONFIDENCE": r["confidence"], "VĂN BẢN OCR": r["text"],
+            "ĐÃ XÁC NHẬN": "CÓ" if r.get("reviewed") else "CHƯA"
+        } for r in results]
+        if st.button("TẠO FILE EXCEL 6 SHEET", type="primary", disabled=not ready):
+            xlsx = build_workbook(group_df, staff_df, matrix_df, revenue_df, warnings, raw_rows, data_date)
+            st.download_button("⬇ TẢI EXCEL", data=xlsx,
+                file_name=f"DMX_SMART_REPORT_{data_date.strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.success("Đã tạo workbook 6 Sheet. Kiểm tra CANH_BAO trước khi sử dụng báo cáo.")
+
     st.divider()
-    st.caption("ĐMX SMART REPORT AI · V1 miễn phí · Không có AI API trả phí · Chưa phải hệ thống báo cáo chính thức.")
+    st.caption("ĐMX SMART REPORT AI · V1.1 nền tảng nghiệp vụ · OCR không thay thế xác minh thủ công.")
 
 if __name__ == "__main__":
     main()
